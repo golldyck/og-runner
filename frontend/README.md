@@ -22,11 +22,12 @@ cp .env.example .env
 Default value:
 
 ```env
-VITE_API_BASE_URL=http://localhost:8000
+VITE_API_BASE_URL=
 ```
 
 ## Notes
 
 - the UI is designed around curated OpenGradient model flows
 - result rendering is model-aware and shows score, summary, and parameter scales
-- the frontend expects the FastAPI backend to be running locally
+- local dev uses a Vite proxy for `/api` and `/health` to `http://127.0.0.1:8000`
+- in Docker, Nginx proxies frontend API traffic to the backend container

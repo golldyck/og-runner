@@ -60,6 +60,20 @@ npm run dev
 
 Frontend runs on `http://127.0.0.1:5173`.
 
+## Production-Like Local Run
+
+Use Docker Compose to run the full stack with the frontend reverse-proxying API requests to the backend.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Services:
+
+- frontend: `http://127.0.0.1:8080`
+- backend API: `http://127.0.0.1:8000`
+
 ## Environment
 
 ### Backend
@@ -78,6 +92,12 @@ Without `OG_PRIVATE_KEY`, OG Runner uses demo fallback mode.
 See [frontend/.env.example](/Users/admin/og-runner/frontend/.env.example).
 
 - `VITE_API_BASE_URL`: backend base URL
+
+### Docker Compose
+
+See [.env.example](/Users/admin/og-runner/.env.example).
+
+These values are passed into the backend container. The frontend container uses an internal Nginx proxy and does not require a hardcoded public API URL.
 
 ## API Endpoints
 
@@ -115,6 +135,12 @@ Backend:
 
 ```bash
 python3 -m compileall backend/app
+```
+
+Containers:
+
+```bash
+docker compose build
 ```
 
 ## Repository

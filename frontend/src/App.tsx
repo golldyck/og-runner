@@ -87,7 +87,11 @@ type ViewTab = 'runner' | 'protocol' | 'leaderboard'
 
 const defaultModelRef = 'https://hub.opengradient.ai/models/Goldy/Governance-Capture-Risk-Scorer'
 const defaultTargetUrl = ''
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
+function apiUrl(path: string) {
+  return `${apiBaseUrl}${path}`
+}
 
 function App() {
   const [modelRef, setModelRef] = useState(defaultModelRef)
@@ -160,7 +164,7 @@ function App() {
 
   async function loadModels() {
     try {
-      const response = await fetch(`${apiBaseUrl}/api/models`)
+      const response = await fetch(apiUrl('/api/models'))
       if (!response.ok) {
         throw new Error('Model gallery failed to load.')
       }
@@ -178,7 +182,7 @@ function App() {
     setRunResult(null)
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/models/resolve`, {
+      const response = await fetch(apiUrl('/api/models/resolve'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_ref: ref }),
@@ -200,7 +204,7 @@ function App() {
 
   async function loadBridgeLeaderboard() {
     try {
-      const response = await fetch(`${apiBaseUrl}/api/leaderboards/bridges`)
+      const response = await fetch(apiUrl('/api/leaderboards/bridges'))
       if (!response.ok) {
         throw new Error('Bridge leaderboard failed to load.')
       }
@@ -214,7 +218,7 @@ function App() {
 
   async function loadGlobalLeaderboard() {
     try {
-      const response = await fetch(`${apiBaseUrl}/api/leaderboards/global`)
+      const response = await fetch(apiUrl('/api/leaderboards/global'))
       if (!response.ok) {
         throw new Error('Global leaderboard failed to load.')
       }
@@ -242,7 +246,7 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/models/run`, {
+      const response = await fetch(apiUrl('/api/models/run'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

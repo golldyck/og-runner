@@ -1,5 +1,8 @@
 """Application configuration using Pydantic Settings."""
 
+import json
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +32,15 @@ class Settings(BaseSettings):
     og_rpc_url: str = "https://ogevmdevnet.opengradient.ai"
     og_api_url: str = "https://sdk-devnet.opengradient.ai"
     og_inference_contract_address: str = "0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            if value.startswith("["):
+                return json.loads(value)
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
 
 settings = Settings()
