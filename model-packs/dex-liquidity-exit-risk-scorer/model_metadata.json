@@ -1,0 +1,21 @@
+{
+  "name": "DEX Liquidity Exit Risk Scorer",
+  "slug": "dex-liquidity-exit-risk-scorer",
+  "owner": "Goldy",
+  "license": "mit",
+  "category": "DEX Liquidity Risk",
+  "summary": "Scores how likely a DEX or pool is to lose usable liquidity under LP exits, emissions decay, concentration, and flow stress before traders fully react.",
+  "hub_url": "https://hub.opengradient.ai/models/Goldy/DEX-Liquidity-Exit-Risk-Scorer",
+  "input_name": "features",
+  "input_shape": [1, 24],
+  "output_name": "liquidity_exit_risk_score",
+  "output_shape": [1, 1],
+  "tags": [
+    "#defi",
+    "#dex",
+    "#liquidity",
+    "#risk",
+    "#market-structure",
+    "#onchain"
+  ]
+}

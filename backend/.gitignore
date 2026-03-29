@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+.venv311/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+
+# Local leaderboard data
+data/

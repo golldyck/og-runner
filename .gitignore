@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Backend
+backend/.venv/
+backend/.venv311/
+backend/venv/
+backend/env/
+backend/__pycache__/
+backend/**/*.py[cod]
+backend/*.egg-info/
+backend/dist/
+backend/build/
+backend/.env
+backend/.env.local
+backend/.env.*
+!backend/.env.example
+backend/data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local screenshots from iterative UI work
+current-og-runner-*.png
