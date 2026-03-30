@@ -29,9 +29,12 @@ class Settings(BaseSettings):
 
     # OpenGradient live inference
     og_private_key: str | None = None
+    og_enable_live_inference: bool = False
+    og_enable_live_llm: bool = False
     og_rpc_url: str = "https://ogevmdevnet.opengradient.ai"
     og_api_url: str = "https://sdk-devnet.opengradient.ai"
     og_inference_contract_address: str = "0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE"
+    og_tee_llm_model: str = "GPT_5_MINI"
 
     @field_validator("cors_origins", mode="before")
     @classmethod

@@ -1,28 +1,45 @@
 """FastAPI application entry point for OG Runner."""
 
+from time import monotonic
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.core.config import settings
 from app.schemas import (
+    AssistantRequest,
+    AssistantModelsResponse,
+    AssistantResponse,
     BridgeLeaderboardResponse,
     GlobalLeaderboardResponse,
     ModelListResponse,
+    ModelSearchResponse,
     ModelResolveRequest,
     ModelResolveResponse,
+    ProtocolPreviewResponse,
     RunModelRequest,
     RunModelResponse,
+    WalletPreflightResponse,
 )
 from app.services.og_runner import (
     build_bridge_leaderboard,
     build_global_leaderboard,
     build_model_usage,
+    build_protocol_proxy_html,
+    fetch_protocol_preview,
+    generate_assistant_answer,
+    get_wallet_preflight,
+    list_available_llm_models,
     list_models,
     run_demo,
     run_live,
     resolve_model,
+    resolve_tee_llm_model_name,
     save_model_run,
+    search_models,
     supports_live_inference,
+    supports_live_llm,
 )
 
 app = FastAPI(
@@ -39,19 +56,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_LIVE_INFERENCE_COOLDOWN_SECONDS = 300
+_live_inference_cooldown_until = 0.0
+_last_live_inference_error = ""
+
+
+def _live_inference_available() -> bool:
+    return supports_live_inference() and monotonic() >= _live_inference_cooldown_until
+
+
+def _live_inference_cooldown_active() -> bool:
+    return supports_live_inference() and monotonic() < _live_inference_cooldown_until
+
+
+def _mark_live_inference_failure(exc: Exception) -> None:
+    global _live_inference_cooldown_until, _last_live_inference_error
+    _live_inference_cooldown_until = monotonic() + _LIVE_INFERENCE_COOLDOWN_SECONDS
+    _last_live_inference_error = str(exc)
+
 
 def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
     execution = None
-    if payload.mode != "demo" and supports_live_inference():
+    if payload.mode != "demo" and _live_inference_available():
         try:
             execution = run_live(model, merged_inputs)
         except Exception as exc:
+            _mark_live_inference_failure(exc)
             execution = run_demo(model, merged_inputs)
             execution.warnings.append(f"Live OpenGradient inference failed, demo fallback used: {exc}")
     else:
         execution = run_demo(model, merged_inputs)
         if payload.mode != "demo":
-            execution.warnings.append("Set OG_PRIVATE_KEY in backend .env to enable live OpenGradient inference.")
+            if _live_inference_cooldown_active():
+                execution.warnings.append(
+                    "Live OpenGradient inference is temporarily cooling down after a failed attempt. Using local fallback."
+                )
+            elif settings.og_private_key and not settings.og_enable_live_inference:
+                execution.warnings.append(
+                    "Live OpenGradient inference is currently disabled in backend settings. Using local fallback."
+                )
+            else:
+                execution.warnings.append("Set OG_PRIVATE_KEY in backend .env to enable live OpenGradient inference.")
     return execution
 
 
@@ -60,8 +105,24 @@ async def health_check() -> dict:
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "opengradient_live_ready": supports_live_inference(),
+        "opengradient_live_ready": _live_inference_available(),
+        "opengradient_llm_ready": supports_live_llm(),
     }
+
+
+@app.get("/api/wallet/preflight", response_model=WalletPreflightResponse)
+async def wallet_preflight_endpoint() -> WalletPreflightResponse:
+    """Return wallet readiness for OpenGradient live inference and TEE LLM flows."""
+    return WalletPreflightResponse(**get_wallet_preflight())
+
+
+@app.get("/api/assistant/models", response_model=AssistantModelsResponse)
+async def assistant_models_endpoint() -> AssistantModelsResponse:
+    """Return available OpenGradient TEE LLM models exposed by the installed SDK."""
+    return AssistantModelsResponse(
+        current_model=resolve_tee_llm_model_name(),
+        models=list_available_llm_models(),
+    )
 
 
 @app.post("/api/models/resolve", response_model=ModelResolveResponse)
@@ -79,6 +140,28 @@ async def resolve_model_endpoint(payload: ModelResolveRequest) -> ModelResolveRe
 async def list_models_endpoint() -> ModelListResponse:
     """Return the curated Goldy model registry."""
     return ModelListResponse(models=list_models())
+
+
+@app.get("/api/models/search", response_model=ModelSearchResponse)
+async def search_models_endpoint(q: str = "") -> ModelSearchResponse:
+    """Search curated models by title, slug, category, or summary."""
+    return ModelSearchResponse(query=q, models=search_models(q))
+
+
+@app.get("/api/protocol/preview", response_model=ProtocolPreviewResponse)
+async def protocol_preview_endpoint(url: str = "") -> ProtocolPreviewResponse:
+    """Fetch lightweight protocol metadata and iframe embedability hints."""
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="Protocol URL is required.")
+    return ProtocolPreviewResponse(**fetch_protocol_preview(url))
+
+
+@app.get("/api/protocol/render", response_class=HTMLResponse)
+async def protocol_render_endpoint(url: str = "") -> HTMLResponse:
+    """Return a proxied HTML document so protocol pages stay visible in the embedded viewport."""
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="Protocol URL is required.")
+    return HTMLResponse(content=build_protocol_proxy_html(url))
 
 
 @app.get("/api/leaderboards/bridges", response_model=BridgeLeaderboardResponse)
@@ -150,3 +233,23 @@ async def run_model_endpoint(payload: RunModelRequest) -> RunModelResponse:
         warnings=execution.warnings,
         comparison=comparison,
     )
+
+
+@app.post("/api/assistant", response_model=AssistantResponse)
+async def assistant_endpoint(payload: AssistantRequest) -> AssistantResponse:
+    """Explain a model, result, or model search request using OpenGradient LLM when configured."""
+    model = None
+    if payload.model_ref:
+        try:
+            model = resolve_model(payload.model_ref)
+        except KeyError:
+            model = None
+
+    answer, source, model_used = generate_assistant_answer(
+        message=payload.message,
+        model=model,
+        result=payload.result,
+        target_url=payload.target_url,
+        llm_model=payload.llm_model,
+    )
+    return AssistantResponse(answer=answer, source=source, model_used=model_used)

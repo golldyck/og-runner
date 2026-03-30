@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from html import unescape
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import numpy as np
 import requests
+from web3 import Web3
 
 from app.core.config import settings
 
@@ -31,6 +36,10 @@ class ExecutionResult:
     warnings: list[str]
     execution_mode: Literal["live", "demo"]
     transaction_hash: str | None = None
+
+
+_LLM_COOLDOWN_SECONDS = 300
+_llm_cooldown_until = 0.0
 
 
 def _number_field(key: str, label: str, description: str, placeholder: str) -> InputField:
@@ -601,11 +610,384 @@ def resolve_model(model_ref: str) -> ModelDefinition:
 
 
 def supports_live_inference() -> bool:
-    return bool(settings.og_private_key and og is not None)
+    return bool(settings.og_enable_live_inference and settings.og_private_key and og is not None)
+
+
+def supports_live_llm() -> bool:
+    return bool(
+        settings.og_enable_live_llm
+        and settings.og_private_key
+        and og is not None
+        and hasattr(og, "LLM")
+        and hasattr(og, "TEE_LLM")
+        and monotonic() >= _llm_cooldown_until
+    )
 
 
 def list_models() -> list[ModelDefinition]:
     return list(MODEL_REGISTRY.values())
+
+
+def search_models(query: str) -> list[ModelDefinition]:
+    normalized = query.strip().lower()
+    if not normalized:
+        return list_models()
+
+    ranked: list[tuple[int, ModelDefinition]] = []
+    for model in MODEL_REGISTRY.values():
+        haystack = " ".join(
+            [
+                model.slug,
+                model.title,
+                model.category,
+                model.summary,
+                model.guide.what_it_does,
+            ]
+        ).lower()
+        score = 0
+        if normalized in model.slug.lower():
+            score += 5
+        if normalized in model.title.lower():
+            score += 4
+        if normalized in model.category.lower():
+            score += 3
+        if normalized in model.summary.lower():
+            score += 2
+        if normalized in model.guide.what_it_does.lower():
+            score += 1
+        if score:
+            ranked.append((score, model))
+
+    ranked.sort(key=lambda item: (-item[0], item[1].title))
+    return [model for _, model in ranked]
+
+
+def fetch_protocol_preview(url: str) -> dict[str, Any]:
+    normalized = _normalize_protocol_url(url)
+    parsed = urlparse(normalized)
+    host = parsed.netloc
+
+    try:
+        response = requests.get(
+            normalized,
+            timeout=8,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                )
+            },
+        )
+        html = response.text[:250000]
+        headers = response.headers
+    except Exception:
+        return {
+            "url": normalized,
+            "host": host,
+            "title": None,
+            "description": None,
+            "image_url": None,
+            "site_name": None,
+            "embed_allowed": False,
+            "status_code": None,
+        }
+
+    return {
+        "url": normalized,
+        "host": host,
+        "title": _extract_html_title(html),
+        "description": _extract_meta_content(html, "description")
+        or _extract_meta_content(html, "og:description")
+        or _extract_meta_content(html, "twitter:description"),
+        "image_url": _resolve_meta_url(
+            normalized,
+            _extract_meta_content(html, "og:image") or _extract_meta_content(html, "twitter:image"),
+        ),
+        "site_name": _extract_meta_content(html, "og:site_name"),
+        "embed_allowed": _is_embed_allowed(headers),
+        "status_code": response.status_code,
+    }
+
+
+def build_protocol_proxy_html(url: str) -> str:
+    normalized = _normalize_protocol_url(url)
+
+    try:
+        response = requests.get(
+            normalized,
+            timeout=12,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                )
+            },
+        )
+        response.raise_for_status()
+        html = response.text
+    except Exception as exc:
+        return _protocol_error_html(normalized, f"Protocol preview could not be loaded: {exc}")
+
+    proxied = _prepare_proxied_html(normalized, html)
+    return proxied or _protocol_error_html(normalized, "Protocol preview returned an empty document.")
+
+
+def _get_alpha_client():
+    return og.Alpha(
+        private_key=settings.og_private_key,
+        rpc_url=settings.og_rpc_url,
+        api_url=settings.og_api_url,
+        inference_contract_address=settings.og_inference_contract_address,
+    )
+
+
+def _get_llm_client():
+    return og.LLM(
+        private_key=settings.og_private_key,
+        rpc_url=settings.og_rpc_url,
+    )
+
+
+def _get_tee_llm_model():
+    preferred = settings.og_tee_llm_model.strip().upper()
+    if hasattr(og.TEE_LLM, preferred):
+        return getattr(og.TEE_LLM, preferred)
+    return og.TEE_LLM.GPT_5_MINI
+
+
+def list_available_llm_models() -> list[str]:
+    if og is None or not hasattr(og, "TEE_LLM"):
+        return []
+    return sorted(name for name in dir(og.TEE_LLM) if name.isupper())
+
+
+def resolve_tee_llm_model_name(preferred: str | None = None) -> str:
+    available = list_available_llm_models()
+    candidate = (preferred or settings.og_tee_llm_model).strip().upper()
+    if candidate in available:
+        return candidate
+    return "GPT_5_MINI" if "GPT_5_MINI" in available else (available[0] if available else candidate)
+
+
+def _get_tee_llm_model_by_name(preferred: str | None = None):
+    resolved = resolve_tee_llm_model_name(preferred)
+    if hasattr(og.TEE_LLM, resolved):
+        return getattr(og.TEE_LLM, resolved)
+    return _get_tee_llm_model()
+
+
+def _extract_llm_text(response: Any) -> str:
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    content = getattr(response, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(response, dict):
+        for key in ("text", "content", "message"):
+            value = response.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(response).strip()
+
+
+def _normalize_protocol_url(url: str) -> str:
+    raw = url.strip()
+    if not raw:
+        return raw
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return f"https://{raw}"
+
+
+def _extract_html_title(html: str) -> str | None:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return _clean_meta_text(match.group(1))
+
+
+def _extract_meta_content(html: str, key: str) -> str | None:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(key)}["\'][^>]+content=["\'](.*?)["\']',
+        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']{re.escape(key)}["\']',
+        rf'<meta[^>]+name=["\']{re.escape(key)}["\'][^>]+content=["\'](.*?)["\']',
+        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']{re.escape(key)}["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return _clean_meta_text(match.group(1))
+    return None
+
+
+def _clean_meta_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", unescape(value)).strip()
+    return cleaned or None
+
+
+def _resolve_meta_url(base_url: str, maybe_url: str | None) -> str | None:
+    if not maybe_url:
+        return None
+    return urljoin(base_url, maybe_url)
+
+
+def _is_embed_allowed(headers: requests.structures.CaseInsensitiveDict[str]) -> bool:
+    x_frame_options = headers.get("x-frame-options", "").lower()
+    if "deny" in x_frame_options or "sameorigin" in x_frame_options:
+        return False
+
+    csp = headers.get("content-security-policy", "").lower()
+    if "frame-ancestors" not in csp:
+        return True
+
+    match = re.search(r"frame-ancestors\s+([^;]+)", csp)
+    if not match:
+        return True
+
+    policy = match.group(1)
+    if "*" in policy:
+        return True
+    if "'self'" in policy or "none" in policy:
+        return False
+    return True
+
+
+def _prepare_proxied_html(base_url: str, html: str) -> str:
+    document = html or ""
+
+    # Remove meta CSP or frame guards that can interfere with embedded rendering in the local runner shell.
+    document = re.sub(
+        r"<meta[^>]+http-equiv=[\"']Content-Security-Policy[\"'][^>]*>",
+        "",
+        document,
+        flags=re.IGNORECASE,
+    )
+    document = re.sub(
+        r"<meta[^>]+http-equiv=[\"']X-Frame-Options[\"'][^>]*>",
+        "",
+        document,
+        flags=re.IGNORECASE,
+    )
+
+    # Keep a safe static render inside the runner viewport instead of executing third-party app code under the local origin.
+    document = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        "",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    document = re.sub(
+        r"<script\b[^>]*/>",
+        "",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    base_tag = f'<base href="{base_url}">'
+    style_tag = """
+<style>
+html, body {
+  min-height: 100%;
+  background: #0b1320 !important;
+}
+body {
+  margin: 0 !important;
+}
+</style>
+""".strip()
+
+    if re.search(r"<head[^>]*>", document, flags=re.IGNORECASE):
+        document = re.sub(
+            r"(<head[^>]*>)",
+            r"\1" + base_tag + style_tag,
+            document,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    else:
+        document = f"<head>{base_tag}{style_tag}</head>{document}"
+
+    return document
+
+
+def _protocol_error_html(url: str, message: str) -> str:
+    host = urlparse(url).netloc or url
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{host}</title>
+    <style>
+      :root {{
+        color-scheme: dark;
+      }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at top, rgba(36,188,227,0.14), transparent 28%), #0b1320;
+        color: #d7e5f7;
+        font: 16px/1.5 "IBM Plex Sans", "Segoe UI", sans-serif;
+      }}
+      .card {{
+        width: min(38rem, calc(100% - 2rem));
+        border-radius: 1rem;
+        border: 1px solid rgba(206,229,249,0.12);
+        background: rgba(15,24,40,0.88);
+        padding: 1rem 1.1rem;
+      }}
+      .host {{
+        margin: 0 0 0.4rem;
+        font-size: 0.72rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #8eb6d7;
+      }}
+      .copy {{
+        margin: 0;
+        color: rgba(215,229,247,0.82);
+      }}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <p class="host">{host}</p>
+      <p class="copy">{message}</p>
+    </div>
+  </body>
+</html>"""
+
+
+def _await_llm_response(value: Any) -> Any:
+    if not asyncio.iscoroutine(value):
+        return value
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(value)
+
+    result_box: dict[str, Any] = {}
+    error_box: dict[str, BaseException] = {}
+
+    def runner():
+        try:
+            result_box["value"] = asyncio.run(value)
+        except BaseException as exc:  # pragma: no cover
+            error_box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box.get("value")
 
 
 def build_bridge_leaderboard() -> list[LeaderboardEntry]:
@@ -660,10 +1042,21 @@ def build_global_leaderboard(limit: int = 8) -> list[LeaderboardEntry]:
         reverse=True,
     )
 
-    for index, entry in enumerate(entries[:limit], start=1):
+    deduped_entries: list[LeaderboardEntry] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for entry in entries:
+        key = _global_leaderboard_key(entry)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped_entries.append(entry)
+        if len(deduped_entries) >= limit:
+            break
+
+    for index, entry in enumerate(deduped_entries, start=1):
         entry.rank = index
 
-    return entries[:limit]
+    return deduped_entries
 
 
 def build_model_usage(limit: int = 5) -> list[ModelUsageStat]:
@@ -680,6 +1073,22 @@ def build_model_usage(limit: int = 5) -> list[ModelUsageStat]:
         counters[entry.model_slug].runs += 1
 
     return sorted(counters.values(), key=lambda item: item.runs, reverse=True)[:limit]
+
+
+def _global_leaderboard_key(entry: LeaderboardEntry) -> tuple[str, str]:
+    model_key = (entry.model_slug or entry.model_title or "unknown-model").strip().lower()
+    protocol_key = _normalize_leaderboard_protocol_url(entry.protocol_url)
+    return model_key, protocol_key
+
+
+def _normalize_leaderboard_protocol_url(url: str | None) -> str:
+    if not url:
+        return "unknown-url"
+
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = parsed.netloc.lower()
+    path = parsed.path.rstrip("/").lower() or "/"
+    return f"{host}{path}"
 
 
 def save_model_run(
@@ -1692,6 +2101,128 @@ def _build_explanation(model: ModelDefinition, result: dict[str, Any]) -> str:
     )
 
 
+def _build_llm_prompt(
+    *,
+    message: str,
+    model: ModelDefinition | None = None,
+    result: dict[str, Any] | None = None,
+    normalized_input: dict[str, Any] | None = None,
+    target_url: str | None = None,
+) -> str:
+    context = {
+        "message": message,
+        "target_url": target_url,
+        "model": model.model_dump() if model else None,
+        "result": result or {},
+        "normalized_input": normalized_input or {},
+    }
+    return (
+        "You are the OG Runner assistant for OpenGradient models. "
+        "Explain clearly what a model does, how it evaluates risk or health, what the current score means, "
+        "and what the most important drivers are. If asked to search models, recommend the most relevant models "
+        "from the provided registry context only. Be concise, concrete, and product-facing.\n\n"
+        f"Context JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}"
+    )
+
+
+def generate_assistant_answer(
+    *,
+    message: str,
+    model: ModelDefinition | None = None,
+    result: dict[str, Any] | None = None,
+    normalized_input: dict[str, Any] | None = None,
+    target_url: str | None = None,
+    llm_model: str | None = None,
+) -> tuple[str, Literal["opengradient_llm", "local_fallback"], str]:
+    global _llm_cooldown_until
+    resolved_llm_model = resolve_tee_llm_model_name(llm_model)
+
+    fallback = (
+        _build_explanation(model, result or {})
+        if model and result
+        else (
+            f"{model.title}: {model.summary} {model.guide.what_it_does}"
+            if model
+            else "OG Runner can explain the selected model, summarize its scoring logic, and suggest the most relevant model for a protocol, bridge, DEX, stablecoin, or NFT use case."
+        )
+    )
+
+    if not supports_live_llm():
+        return fallback, "local_fallback", resolved_llm_model
+
+    try:
+        llm = _get_llm_client()
+        response = llm.completion(
+            model=_get_tee_llm_model_by_name(resolved_llm_model),
+            prompt=_build_llm_prompt(
+                message=message,
+                model=model,
+                result=result,
+                normalized_input=normalized_input,
+                target_url=target_url,
+            ),
+            max_tokens=260,
+            temperature=0.2,
+            x402_settlement_mode=og.x402SettlementMode.PRIVATE,
+        )
+        answer = _extract_llm_text(_await_llm_response(response))
+        return (answer or fallback), "opengradient_llm", resolved_llm_model
+    except Exception:
+        _llm_cooldown_until = monotonic() + _LLM_COOLDOWN_SECONDS
+        return fallback, "local_fallback", resolved_llm_model
+
+
+def get_wallet_preflight() -> dict[str, Any]:
+    issues: list[str] = []
+    if not settings.og_private_key or og is None:
+        return {
+            "wallet_address": None,
+            "base_sepolia_eth": None,
+            "opg_balance": None,
+            "permit2_allowance": None,
+            "llm_ready": False,
+            "live_inference_ready": False,
+            "issues": ["OG_PRIVATE_KEY is not configured."],
+        }
+
+    try:
+        import opengradient.client.opg_token as opg_token
+
+        llm = _get_llm_client()
+        owner = Web3.to_checksum_address(llm._wallet_account.address)
+        w3, token, spender = opg_token._get_web3_and_contract()
+        eth_balance = float(w3.eth.get_balance(owner)) / 10**18
+        opg_balance = float(token.functions.balanceOf(owner).call()) / 10**18
+        allowance = float(token.functions.allowance(owner, spender).call()) / 10**18
+
+        if eth_balance <= 0:
+            issues.append("Wallet has no Base Sepolia ETH for gas.")
+        if opg_balance <= 0:
+            issues.append("Wallet has no OPG balance.")
+        if allowance < 0.1:
+            issues.append("Permit2 OPG allowance is below 0.1 OPG for TEE LLM payments.")
+
+        return {
+            "wallet_address": owner,
+            "base_sepolia_eth": eth_balance,
+            "opg_balance": opg_balance,
+            "permit2_allowance": allowance,
+            "llm_ready": eth_balance > 0 and opg_balance > 0 and allowance >= 0.1,
+            "live_inference_ready": eth_balance > 0,
+            "issues": issues,
+        }
+    except Exception as exc:
+        return {
+            "wallet_address": None,
+            "base_sepolia_eth": None,
+            "opg_balance": None,
+            "permit2_allowance": None,
+            "llm_ready": False,
+            "live_inference_ready": False,
+            "issues": [f"Wallet preflight failed: {exc}"],
+        }
+
+
 def _shape_result(model: ModelDefinition, model_output: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
     if model.slug == "governance-capture-risk-scorer":
         return _shape_governance_result(model_output, values)
@@ -1712,8 +2243,19 @@ def run_demo(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
     extracted_inputs, extraction_warnings = infer_inputs_from_url(model, inputs.get("target_url"))
     values = {**model.sample_input, **extracted_inputs, **inputs}
     result = _shape_result(model, {}, values)
-    explanation = _build_explanation(model, result)
+    explanation, explanation_source, _ = generate_assistant_answer(
+        message="Explain what this model does, how it scored the target, and what the main drivers are.",
+        model=model,
+        result=result,
+        normalized_input=values,
+        target_url=inputs.get("target_url"),
+    )
     warnings.extend(extraction_warnings)
+    if explanation_source == "local_fallback":
+        if settings.og_private_key and not settings.og_enable_live_llm:
+            warnings.append("OpenGradient LLM explanations are currently disabled in backend settings. Using local fallback.")
+        else:
+            warnings.append("OpenGradient LLM assistant is not configured; local explanation fallback used.")
 
     return ExecutionResult(
         normalized_input=values,
@@ -1732,12 +2274,7 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
 
     extracted_inputs, extraction_warnings = infer_inputs_from_url(model, inputs.get("target_url"))
     values = {**model.sample_input, **extracted_inputs, **inputs}
-    alpha = og.Alpha(
-        private_key=settings.og_private_key,
-        rpc_url=settings.og_rpc_url,
-        api_url=settings.og_api_url,
-        inference_contract_address=settings.og_inference_contract_address,
-    )
+    alpha = _get_alpha_client()
     inference_result = alpha.infer(
         model_cid=model.model_cid,
         inference_mode=og.InferenceMode.VANILLA,
@@ -1745,9 +2282,20 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
     )
     raw_output = _scalarize(inference_result.model_output)
     result = _shape_result(model, raw_output, values)
-    explanation = _build_explanation(model, result)
+    explanation, explanation_source, _ = generate_assistant_answer(
+        message="Explain what this model does, how it scored the target, and what the main drivers are.",
+        model=model,
+        result=result,
+        normalized_input=values,
+        target_url=inputs.get("target_url"),
+    )
 
     warnings: list[str] = extraction_warnings
+    if explanation_source == "local_fallback":
+        if settings.og_private_key and not settings.og_enable_live_llm:
+            warnings.append("OpenGradient LLM explanations are currently disabled in backend settings. Using local fallback.")
+        else:
+            warnings.append("OpenGradient LLM assistant is not configured; local explanation fallback used.")
 
     return ExecutionResult(
         normalized_input=values,

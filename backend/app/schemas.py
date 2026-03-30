@@ -50,6 +50,11 @@ class ModelListResponse(BaseModel):
     models: list[ModelDefinition]
 
 
+class ModelSearchResponse(BaseModel):
+    query: str
+    models: list[ModelDefinition]
+
+
 class LeaderboardEntry(BaseModel):
     rank: int
     source: Literal["curated", "user"]
@@ -99,3 +104,43 @@ class RunModelResponse(BaseModel):
     transaction_hash: str | None = None
     warnings: list[str] = Field(default_factory=list)
     comparison: list["RunModelResponse"] = Field(default_factory=list)
+
+
+class AssistantRequest(BaseModel):
+    message: str = Field(..., min_length=3)
+    model_ref: str | None = None
+    llm_model: str | None = None
+    target_url: str | None = None
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssistantResponse(BaseModel):
+    answer: str
+    source: Literal["opengradient_llm", "local_fallback"]
+    model_used: str | None = None
+
+
+class AssistantModelsResponse(BaseModel):
+    current_model: str
+    models: list[str]
+
+
+class WalletPreflightResponse(BaseModel):
+    wallet_address: str | None = None
+    base_sepolia_eth: float | None = None
+    opg_balance: float | None = None
+    permit2_allowance: float | None = None
+    llm_ready: bool
+    live_inference_ready: bool
+    issues: list[str] = Field(default_factory=list)
+
+
+class ProtocolPreviewResponse(BaseModel):
+    url: str
+    host: str
+    title: str | None = None
+    description: str | None = None
+    image_url: str | None = None
+    site_name: str | None = None
+    embed_allowed: bool
+    status_code: int | None = None
