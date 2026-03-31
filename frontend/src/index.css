@@ -374,6 +374,10 @@ input {
   line-height: 1.4;
 }
 
+.field-help-inline {
+  margin-top: -0.1rem;
+}
+
 .picker-shell {
   position: relative;
 }
@@ -449,6 +453,12 @@ input {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   line-height: 1.4;
   white-space: pre;
+}
+
+.matrix-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
 }
 
 .picker-trigger {

@@ -788,18 +788,85 @@ function App() {
                                   {inputValues[field.key] ? 'True' : 'False'}
                                 </button>
                               ) : isMatrixField(model, field) ? (
-                                <textarea
-                                  className="screen-input screen-textarea"
-                                  value={String(inputValues[field.key] ?? '')}
-                                  onChange={(event) =>
-                                    setInputValues((current) => ({
-                                      ...current,
-                                      [field.key]: event.target.value,
-                                    }))
-                                  }
-                                  placeholder={field.placeholder ?? field.description}
-                                  spellCheck={false}
-                                />
+                                <>
+                                  <div className="matrix-tools">
+                                    <button
+                                      className="choice-chip"
+                                      type="button"
+                                      onClick={() => {
+                                        const raw = String(inputValues[field.key] ?? '')
+                                        const parsed = parseMatrixFromText(raw)
+                                        const shape = getMatrixFieldShape(model, field)
+                                        if (!parsed || !shape) {
+                                          return
+                                        }
+                                        const [rows, cols] = shape
+                                        const newRow = Array.from({ length: cols }, () => 0)
+                                        const next = parsed.slice(0, rows)
+                                        next.push(newRow)
+                                        setInputValues((current) => ({
+                                          ...current,
+                                          [field.key]: JSON.stringify(next, null, 2),
+                                        }))
+                                      }}
+                                    >
+                                      Add row
+                                    </button>
+                                    <button
+                                      className="choice-chip"
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          const csv = await navigator.clipboard.readText()
+                                          const parsed = parseMatrixFromCsv(csv)
+                                          if (!parsed) {
+                                            return
+                                          }
+                                          setInputValues((current) => ({
+                                            ...current,
+                                            [field.key]: JSON.stringify(parsed, null, 2),
+                                          }))
+                                        } catch {
+                                          // Clipboard permission can be blocked by browser policy.
+                                        }
+                                      }}
+                                    >
+                                      Paste CSV
+                                    </button>
+                                    <button
+                                      className="choice-chip"
+                                      type="button"
+                                      onClick={() => {
+                                        const raw = String(inputValues[field.key] ?? '')
+                                        const parsed = parseMatrixFromText(raw)
+                                        if (!parsed) {
+                                          return
+                                        }
+                                        setInputValues((current) => ({
+                                          ...current,
+                                          [field.key]: JSON.stringify(parsed, null, 2),
+                                        }))
+                                      }}
+                                    >
+                                      Format JSON
+                                    </button>
+                                  </div>
+                                  <textarea
+                                    className="screen-input screen-textarea"
+                                    value={String(inputValues[field.key] ?? '')}
+                                    onChange={(event) =>
+                                      setInputValues((current) => ({
+                                        ...current,
+                                        [field.key]: event.target.value,
+                                      }))
+                                    }
+                                    placeholder={field.placeholder ?? field.description}
+                                    spellCheck={false}
+                                  />
+                                  <p className="field-help field-help-inline">
+                                    {getMatrixFieldValidationMessage(model, field, String(inputValues[field.key] ?? ''))}
+                                  </p>
+                                </>
                               ) : (
                                 <input
                                   className="screen-input"
@@ -1848,6 +1915,101 @@ function getMatrixFieldHint(model: ModelDefinition, field: InputField) {
     return null
   }
   return `${sampleValue.length} x ${sampleValue[0].length}`
+}
+
+function getMatrixFieldShape(model: ModelDefinition, field: InputField): [number, number] | null {
+  const sampleValue = model.sample_input?.[field.key]
+  if (!Array.isArray(sampleValue) || sampleValue.length === 0 || !Array.isArray(sampleValue[0])) {
+    return null
+  }
+  return [sampleValue.length, sampleValue[0].length]
+}
+
+function getMatrixFieldValidationMessage(model: ModelDefinition, field: InputField, raw: string) {
+  const shape = getMatrixFieldShape(model, field)
+  const parsed = parseMatrixFromText(raw)
+  if (!shape) {
+    return 'Matrix shape is unknown for this field.'
+  }
+  const [expectedRows, expectedCols] = shape
+  if (!raw.trim()) {
+    return `Expected shape: ${expectedRows} x ${expectedCols}.`
+  }
+  if (!parsed) {
+    return 'Input is not a valid numeric matrix JSON/CSV.'
+  }
+  const actualRows = parsed.length
+  const actualCols = parsed[0]?.length ?? 0
+  const rowMismatch = actualRows !== expectedRows
+  const colMismatch = actualCols !== expectedCols
+  if (rowMismatch || colMismatch) {
+    return `Parsed ${actualRows} x ${actualCols}. Expected ${expectedRows} x ${expectedCols}.`
+  }
+  return `Shape OK: ${actualRows} x ${actualCols}.`
+}
+
+function parseMatrixFromText(raw: string): number[][] | null {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      return coerceToNumericMatrix(parsed)
+    } catch {
+      return null
+    }
+  }
+
+  return parseMatrixFromCsv(trimmed)
+}
+
+function parseMatrixFromCsv(raw: string): number[][] | null {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) {
+    return null
+  }
+
+  const rows = lines.map((line) => line.split(/[\t,;]+/).map((value) => Number(value.trim())))
+  if (rows.some((row) => row.some((value) => !Number.isFinite(value)))) {
+    return null
+  }
+
+  const width = rows[0]?.length ?? 0
+  if (!width || rows.some((row) => row.length !== width)) {
+    return null
+  }
+
+  return rows
+}
+
+function coerceToNumericMatrix(value: unknown): number[][] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null
+  }
+  const rows = value.map((row) => {
+    if (!Array.isArray(row) || row.length === 0) {
+      return null
+    }
+    const numeric = row.map((item) => Number(item))
+    return numeric.every((entry) => Number.isFinite(entry)) ? numeric : null
+  })
+
+  if (rows.some((row) => row === null)) {
+    return null
+  }
+
+  const matrix = rows as number[][]
+  const width = matrix[0]?.length ?? 0
+  if (!width || matrix.some((row) => row.length !== width)) {
+    return null
+  }
+  return matrix
 }
 
 function _humanizeLabel(value: string) {
