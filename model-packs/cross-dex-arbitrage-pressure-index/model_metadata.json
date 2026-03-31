@@ -1,0 +1,21 @@
+{
+  "name": "Cross DEX Arbitrage Pressure Index",
+  "slug": "cross-dex-arbitrage-pressure-index",
+  "owner": "Goldy",
+  "license": "mit",
+  "category": "Risk Models",
+  "summary": "Scores cross-venue arbitrage pressure and execution fragility across DEX markets using spread, friction, liquidity fragmentation, and flow imbalance signals.",
+  "hub_url": "https://hub.opengradient.ai/models/Goldy/Cross-DEX-Arbitrage-Pressure-Index",
+  "input_name": "features",
+  "input_shape": [1, 20],
+  "output_name": "arbitrage_pressure_score",
+  "output_shape": [1, 1],
+  "tags": [
+    "#defi",
+    "#dex",
+    "#arbitrage",
+    "#risk",
+    "#market-structure",
+    "#onchain"
+  ]
+}
