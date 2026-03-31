@@ -856,9 +856,9 @@ def _placeholder_for_value(value: Any) -> str:
 def _build_remote_model_definition(payload: dict[str, Any]) -> ModelDefinition:
     description = str(payload.get("description") or "")
     sections = _markdown_sections(description)
-    sample_input = _extract_json_object(_section_by_names(sections, "input schema", "sample input"))
-    output_schema = _extract_json_object(_section_by_names(sections, "output schema", "sample output"))
-    feature_descriptions = _extract_feature_descriptions(_section_by_names(sections, "input features", "input feature"))
+    sample_input = _extract_json_object(_section_by_names(sections, "input schema", "sample input", "input"))
+    output_schema = _extract_json_object(_section_by_names(sections, "output schema", "sample output", "output"))
+    feature_descriptions = _extract_feature_descriptions(_section_by_names(sections, "input features", "input feature", "input"))
     inline_feature_descriptions = _extract_inline_features(description)
     if not feature_descriptions:
         feature_descriptions = inline_feature_descriptions
@@ -926,6 +926,8 @@ def _build_remote_model_definition(payload: dict[str, Any]) -> ModelDefinition:
 
     if not sample_input and input_shape == "[1, 1]" and input_fields:
         input_shape = f"[1, {len(input_fields)}]"
+    if sample_input and input_shape == "[1, 1]" and len(sample_input) > 1:
+        input_shape = f"[1, {len(sample_input)}]"
     if input_shape == "[1, 1]" and len(sample_input) == 1:
         only_value = next(iter(sample_input.values()))
         if isinstance(only_value, list) and only_value and isinstance(only_value[0], list):
