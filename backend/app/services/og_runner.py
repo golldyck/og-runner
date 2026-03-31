@@ -3370,6 +3370,15 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
         if not should_retry_on_alpha_rpc:
             raise
 
+        try:
+            owner = Web3().eth.account.from_key(settings.og_private_key).address
+            alpha_w3 = Web3(Web3.HTTPProvider(_ALPHA_RPC_FALLBACK_URL))
+            alpha_balance = float(alpha_w3.eth.get_balance(owner)) / 10**18
+            if alpha_balance <= 0:
+                raise exc
+        except Exception:
+            raise exc
+
         alpha = _get_alpha_client(rpc_url=_ALPHA_RPC_FALLBACK_URL)
         inference_result = alpha.infer(
             model_cid=model.model_cid,
