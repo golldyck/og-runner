@@ -82,8 +82,17 @@ def _live_inference_cooldown_active() -> bool:
 
 def _mark_live_inference_failure(exc: Exception) -> None:
     global _live_inference_cooldown_until, _last_live_inference_error
+    message = str(exc)
+    _last_live_inference_error = message
+    lowered = message.lower()
+    should_skip_cooldown = (
+        "live inference requires a concrete model cid" in lowered
+        or "inferenceresult event not found" in lowered
+    )
+    if should_skip_cooldown:
+        _live_inference_cooldown_until = 0.0
+        return
     _live_inference_cooldown_until = monotonic() + _LIVE_INFERENCE_COOLDOWN_SECONDS
-    _last_live_inference_error = str(exc)
 
 
 def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
@@ -122,6 +131,7 @@ async def health_check() -> dict:
         "status": "healthy",
         "opengradient_live_ready": _live_inference_available(),
         "opengradient_llm_ready": supports_live_llm(),
+        "opengradient_last_error": _last_live_inference_error or None,
     }
 
 
