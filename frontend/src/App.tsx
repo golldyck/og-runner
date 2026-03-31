@@ -579,7 +579,7 @@ function App() {
 
       if (!response.ok) {
         const failure = await response.text()
-        throw new Error(failure || 'Model execution failed.')
+        throw new Error(getRunFailureMessage(response.status, failure))
       }
 
       const payload = (await response.json()) as RunResponse
@@ -2502,6 +2502,53 @@ function getResultSourceLabel(model: ModelDefinition | null) {
   }
 
   return 'Target'
+}
+
+function parseApiFailureDetail(raw: string) {
+  if (!raw.trim()) {
+    return ''
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown; message?: unknown }
+    if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+      return parsed.detail
+    }
+    if (typeof parsed.message === 'string' && parsed.message.trim()) {
+      return parsed.message
+    }
+  } catch {
+    // Keep raw text if the backend didn't return JSON.
+  }
+
+  return raw.trim()
+}
+
+function getRunFailureMessage(status: number, rawFailure: string) {
+  const detail = parseApiFailureDetail(rawFailure)
+  const lowered = detail.toLowerCase()
+
+  if (status === 502 && lowered.includes('inferenceresult event not found in transaction logs')) {
+    return 'Live run failed: OpenGradient network did not confirm the inference event. Please retry in a moment.'
+  }
+
+  if (status === 502 && lowered.includes('requires a concrete model cid')) {
+    return 'Live run failed: this Hub model does not expose a deployable on-chain CID yet. Choose a curated model or switch to Demo mode.'
+  }
+
+  if (status === 502 && lowered.includes('account') && lowered.includes('does not exist')) {
+    return 'Live run failed: the configured wallet is not active on the selected OpenGradient chain.'
+  }
+
+  if (status >= 500 && detail) {
+    return `Server error (${status}): ${detail}`
+  }
+
+  if (detail) {
+    return detail
+  }
+
+  return 'Model execution failed.'
 }
 
 function sortBridgeEntries(entries: LeaderboardEntry[], sortKey: BridgeSortKey) {
