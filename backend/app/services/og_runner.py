@@ -1026,6 +1026,10 @@ def build_market_context(
     items: list[dict[str, str | None]] = []
     notes: list[str] = []
 
+    tape_context = _build_binance_market_tape()
+    items.extend(tape_context["items"])
+    notes.extend(tape_context["notes"])
+
     if model.slug == "cross-chain-bridge-risk-classifier":
         bridge_context = _build_bridge_market_context(target_url, values)
         items.extend(bridge_context["items"])
@@ -1047,8 +1051,12 @@ def build_market_context(
         items.extend(nft_context["items"])
         notes.extend(nft_context["notes"])
 
+    sentiment_context = _build_polymarket_context(model, target_url)
+    items.extend(sentiment_context["items"])
+    notes.extend(sentiment_context["notes"])
+
     unique_notes = [note for note in dict.fromkeys(note for note in notes if note)]
-    return {"items": items[:6], "notes": unique_notes[:3]}
+    return {"items": items[:10], "notes": unique_notes[:4]}
 
 
 def build_protocol_proxy_html(url: str) -> str:
@@ -1145,6 +1153,18 @@ def _format_percent(value: Any, scale: float = 1.0) -> str:
     except Exception:
         return "-"
     return f"{amount:.2f}%"
+
+
+def _format_compact_price(value: Any) -> str:
+    try:
+        amount = float(value)
+    except Exception:
+        return "-"
+    if amount >= 1000:
+        return f"${amount:,.0f}"
+    if amount >= 1:
+        return f"${amount:,.2f}"
+    return f"${amount:.4f}"
 
 
 def _extract_target_host(target_url: str | None) -> str:
@@ -1247,6 +1267,147 @@ def _fetch_coingecko_contract_market(address: str) -> dict[str, Any] | None:
             "source": "CoinGecko",
         }
     return None
+
+
+def _fetch_binance_ticker(symbol: str) -> dict[str, Any] | None:
+    payload = _fetch_json(
+        "https://api.binance.com/api/v3/ticker/24hr",
+        params={"symbol": symbol},
+        timeout=6,
+        cache_key=f"binance_ticker:{symbol}",
+    )
+    return payload if isinstance(payload, dict) else None
+
+
+def _build_binance_market_tape() -> dict[str, Any]:
+    items: list[dict[str, str | None]] = []
+    notes: list[str] = []
+    for symbol, label in (("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")):
+        ticker = _fetch_binance_ticker(symbol)
+        if not ticker:
+            continue
+        items.append(
+            {
+                "label": label,
+                "value": _format_compact_price(ticker.get("lastPrice")),
+                "detail": f"24h {_format_percent(_price_change_pct(ticker))} · Vol {_format_usd(ticker.get('quoteVolume'))}",
+                "source": "Binance",
+            }
+        )
+    if items:
+        notes.append("Live market tape loaded from Binance spot data.")
+    return {"items": items, "notes": notes}
+
+
+def _price_change_pct(ticker: dict[str, Any]) -> float | None:
+    try:
+        open_price = float(ticker.get("openPrice"))
+        last_price = float(ticker.get("lastPrice"))
+        if open_price == 0:
+            return None
+        return ((last_price - open_price) / open_price) * 100
+    except Exception:
+        return None
+
+
+def _polymarket_keyword(model: ModelDefinition, target_url: str | None) -> str:
+    host = _extract_target_host(target_url)
+    lowered_host = host.lower()
+    if model.slug == "stablecoin-depeg-risk-monitor":
+        for keyword in ("usdc", "usdt", "dai", "frax", "ethena", "usde"):
+            if keyword in lowered_host or keyword in (target_url or "").lower():
+                return keyword
+        return "usdc"
+    if model.slug == "governance-capture-risk-scorer":
+        for keyword in ("aave", "uniswap", "compound", "maker", "sky"):
+            if keyword in lowered_host:
+                return keyword
+        return "ethereum"
+    if model.slug in {"cross-chain-bridge-risk-classifier", "defi-protocol-health-score", "dex-liquidity-exit-risk-scorer", "nft-wash-trading-detector"}:
+        return "ethereum"
+    return "crypto"
+
+
+def _fetch_polymarket_search(query: str) -> dict[str, Any] | None:
+    normalized = query.strip().lower()
+    if not normalized:
+        return None
+    payload = _fetch_json(
+        "https://gamma-api.polymarket.com/public-search",
+        params={"q": normalized, "take": 5},
+        timeout=8,
+        cache_key=f"polymarket_search:{normalized}",
+    )
+    return payload if isinstance(payload, dict) else None
+
+
+def _decode_outcome_arrays(market: dict[str, Any]) -> tuple[list[str], list[float]]:
+    raw_outcomes = market.get("outcomes")
+    raw_prices = market.get("outcomePrices")
+    outcomes: list[str] = []
+    prices: list[float] = []
+    try:
+        if isinstance(raw_outcomes, str):
+            outcomes = [str(item) for item in json.loads(raw_outcomes)]
+        elif isinstance(raw_outcomes, list):
+            outcomes = [str(item) for item in raw_outcomes]
+    except Exception:
+        outcomes = []
+    try:
+        if isinstance(raw_prices, str):
+            prices = [float(item) for item in json.loads(raw_prices)]
+        elif isinstance(raw_prices, list):
+            prices = [float(item) for item in raw_prices]
+    except Exception:
+        prices = []
+    return outcomes, prices
+
+
+def _build_polymarket_context(model: ModelDefinition, target_url: str | None) -> dict[str, Any]:
+    query = _polymarket_keyword(model, target_url)
+    payload = _fetch_polymarket_search(query)
+    if not payload:
+        return {"items": [], "notes": []}
+
+    events = payload.get("events") or []
+    if not isinstance(events, list) or not events:
+        return {"items": [], "notes": []}
+
+    event = next((candidate for candidate in events if candidate.get("active") is True), events[0])
+    markets = event.get("markets") or []
+    if not isinstance(markets, list) or not markets:
+        return {"items": [], "notes": []}
+
+    market = next((candidate for candidate in markets if candidate.get("active") is True), markets[0])
+    outcomes, prices = _decode_outcome_arrays(market)
+    if outcomes and prices and len(outcomes) == len(prices):
+        best_index = max(range(len(prices)), key=lambda idx: prices[idx])
+        consensus = f"{prices[best_index] * 100:.1f}% {outcomes[best_index]}"
+    else:
+        consensus = "-"
+
+    volume = market.get("volume24hr") or event.get("volume24hr") or market.get("volume")
+    label = "Prediction"
+    if query in {"ethereum", "bitcoin", "usdc", "usdt"}:
+        label = f"{query.upper()} sentiment" if query != "ethereum" else "ETH sentiment"
+
+    return {
+        "items": [
+            {
+                "label": label,
+                "value": consensus,
+                "detail": str(market.get("question") or event.get("title") or "Live Polymarket signal"),
+                "source": "Polymarket",
+            },
+            {
+                "label": "PM volume",
+                "value": _format_usd(volume),
+                "detail": "24h event activity",
+                "source": "Polymarket",
+            },
+        ],
+        "notes": [f"Prediction signal loaded from Polymarket search for '{query}'."],
+    }
 
 
 def _build_bridge_market_context(target_url: str | None, values: dict[str, Any]) -> dict[str, Any]:
