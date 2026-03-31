@@ -225,8 +225,8 @@ input {
   width: 1.05rem;
   height: 1.05rem;
   display: block;
-  color: #8dffb5;
-  filter: drop-shadow(0 0 10px rgba(109, 255, 163, 0.58));
+  color: #59d6de;
+  filter: drop-shadow(0 0 10px rgba(89, 214, 222, 0.52));
   animation: og-logo-breathe 2.8s ease-in-out infinite;
 }
 
