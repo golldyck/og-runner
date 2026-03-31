@@ -266,6 +266,7 @@ function App() {
   const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({})
   const [matrixGridView, setMatrixGridView] = useState<Record<string, boolean>>({})
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
+  const matrixFieldRefs = useRef<Record<string, HTMLLabelElement | null>>({})
   const previousModelSlugRef = useRef<string | null>(null)
 
   const selectedModelOption = models.some((item) => item.hub_url === modelRef) ? modelRef : '__custom__'
@@ -274,6 +275,22 @@ function App() {
   const hasMatrixFields = matrixFields.length > 0
   const invalidMatrixFields = model ? getInvalidMatrixFields(model, inputValues) : []
   const hasMatrixValidationError = invalidMatrixFields.length > 0
+
+  function scrollToFirstInvalidMatrixField(fieldLabels: string[]) {
+    const firstInvalidLabel = fieldLabels[0]
+    if (!firstInvalidLabel) {
+      return
+    }
+
+    const fieldNode = matrixFieldRefs.current[firstInvalidLabel]
+    if (!fieldNode) {
+      return
+    }
+
+    fieldNode.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const focusTarget = fieldNode.querySelector('input, textarea, button') as HTMLElement | null
+    focusTarget?.focus({ preventScroll: true })
+  }
 
   useEffect(() => {
     void loadModels()
@@ -538,6 +555,7 @@ function App() {
       return
     }
     if (hasMatrixValidationError) {
+      scrollToFirstInvalidMatrixField(invalidMatrixFields)
       setError(`Matrix validation failed for: ${invalidMatrixFields.join(', ')}. Fix input shape/data before running.`)
       return
     }
@@ -779,7 +797,17 @@ function App() {
                             const matrixShape = isMatrix ? getMatrixFieldShape(model, field) : null
 
                             return (
-                              <label key={field.key} className="field-shell">
+                              <label
+                                key={field.key}
+                                className="field-shell"
+                                ref={
+                                  isMatrix
+                                    ? (node) => {
+                                        matrixFieldRefs.current[field.label] = node
+                                      }
+                                    : undefined
+                                }
+                              >
                                 <span className="field-label">
                                   {field.label}
                                   {isMatrix ? (
@@ -1014,6 +1042,8 @@ function App() {
                             className="screen-button screen-button-muted"
                             onClick={() => {
                               if (hasMatrixValidationError) {
+                                setActiveTab('runner')
+                                scrollToFirstInvalidMatrixField(invalidMatrixFields)
                                 setError(`Matrix validation failed for: ${invalidMatrixFields.join(', ')}. Fix input shape/data before running.`)
                               } else {
                                 setError(null)
