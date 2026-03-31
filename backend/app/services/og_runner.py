@@ -1296,6 +1296,22 @@ def _build_binance_market_tape() -> dict[str, Any]:
         )
     if items:
         notes.append("Live market tape loaded from Binance spot data.")
+        return {"items": items, "notes": notes}
+
+    for coin_id, label in (("bitcoin", "BTC"), ("ethereum", "ETH")):
+        market = _fetch_coingecko_market(coin_id)
+        if not market:
+            continue
+        items.append(
+            {
+                "label": label,
+                "value": _format_compact_price(market.get("current_price")),
+                "detail": f"24h {_format_percent(market.get('price_change_percentage_24h'))} · MCap {_format_usd(market.get('market_cap'))}",
+                "source": "CoinGecko",
+            }
+        )
+    if items:
+        notes.append("Binance market tape was unavailable on this host, so CoinGecko fallback prices are shown instead.")
     return {"items": items, "notes": notes}
 
 
