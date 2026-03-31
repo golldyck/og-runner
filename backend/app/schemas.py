@@ -40,6 +40,9 @@ class ModelDefinition(BaseModel):
     input_fields: list[InputField]
     sample_input: dict[str, Any]
     guide: ModelGuide
+    source: Literal["curated", "hub_dynamic"] = "curated"
+    schema_confidence: Literal["high", "medium", "low"] = "high"
+    detected_task_type: str | None = None
 
 
 class ModelResolveResponse(BaseModel):

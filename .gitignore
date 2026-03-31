@@ -40,3 +40,8 @@ __pycache__/
 
 # Local screenshots from iterative UI work
 current-og-runner-*.png
+current-layout-fit-check*.png
+current-test-start.png
+protocol-*.png
+run-state.png
+tmp-hub-model.json

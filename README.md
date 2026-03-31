@@ -74,6 +74,33 @@ Services:
 - frontend: `http://127.0.0.1:8080`
 - backend API: `http://127.0.0.1:8000`
 
+## Railway Deploy
+
+Deploy this repo as two services in the same Railway project:
+
+- `backend`
+  Root directory: `/backend`
+  Config file: `/backend/railway.json`
+- `frontend`
+  Root directory: `/frontend`
+  Config file: `/frontend/railway.json`
+
+The frontend is the only service that needs a public domain. It proxies `/api` and `/health` to the private backend service over Railway private networking at `backend.railway.internal:8000`.
+
+Recommended backend variables on Railway:
+
+- `CORS_ORIGINS=["https://${{frontend.RAILWAY_PUBLIC_DOMAIN}}"]`
+- `OG_PRIVATE_KEY=...`
+- `OG_ENABLE_LIVE_INFERENCE=false`
+- `OG_ENABLE_LIVE_LLM=false`
+- `OG_RPC_URL=https://ogevmdevnet.opengradient.ai`
+- `OG_API_URL=https://sdk-devnet.opengradient.ai`
+- `OG_INFERENCE_CONTRACT_ADDRESS=0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE`
+
+Recommended frontend variables on Railway:
+
+- none required when using the bundled Nginx proxy
+
 ## Environment
 
 ### Backend

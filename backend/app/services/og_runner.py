@@ -12,6 +12,7 @@ from html import unescape
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
+from urllib.parse import quote
 from urllib.parse import urljoin, urlparse
 
 import numpy as np
@@ -588,6 +589,301 @@ BRIDGE_LEADERBOARD_PROFILES: list[dict[str, Any]] = [
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 BRIDGE_RUNS_PATH = DATA_DIR / "bridge_runs.json"
 MODEL_RUNS_PATH = DATA_DIR / "model_runs.json"
+_REMOTE_MODEL_CACHE: dict[str, ModelDefinition] = {}
+
+
+def _parse_hub_model_ref(model_ref: str) -> tuple[str, str] | None:
+    normalized = model_ref.strip()
+    if not normalized:
+        return None
+
+    hub_match = re.search(r"hub\.opengradient\.ai/models/([^/]+)/([^/?#]+)", normalized, flags=re.IGNORECASE)
+    if hub_match:
+        return hub_match.group(1), hub_match.group(2)
+
+    if re.fullmatch(r"[^/\s]+/[^/\s]+", normalized):
+        author, name = normalized.split("/", 1)
+        return author, name
+
+    return None
+
+
+def _fetch_remote_model_definition(author: str, name: str) -> ModelDefinition:
+    cache_key = f"{author}/{name}".lower()
+    cached = _REMOTE_MODEL_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    response = requests.get(
+        f"https://hub-api.opengradient.ai/api/v0/models/{quote(name, safe='')}",
+        params={"authorUsername": author},
+        timeout=10,
+        headers={"User-Agent": "OG-Runner/0.1"},
+    )
+    if response.status_code == 404:
+        raise KeyError(f"Unknown model reference: {author}/{name}")
+    response.raise_for_status()
+    payload = response.json()
+    model = _build_remote_model_definition(payload)
+    _REMOTE_MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _slugify_model_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _humanize_key(key: str) -> str:
+    return re.sub(r"\s+", " ", key.replace("_", " ").replace("-", " ")).strip().title()
+
+
+def _strip_markdown(text: str) -> str:
+    cleaned = re.sub(r"`([^`]+)`", r"\1", text)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"^#+\s*", "", cleaned, flags=re.MULTILINE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        heading = re.match(r"^\s{0,3}#{2,3}\s+(.+?)\s*$", line)
+        if heading:
+            current = heading.group(1).strip().lower()
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def _section_by_names(sections: dict[str, str], *names: str) -> str:
+    for key, value in sections.items():
+        if any(name.lower() in key for name in names):
+            return value
+    return ""
+
+
+def _extract_json_object(section: str) -> dict[str, Any]:
+    if not section:
+        return {}
+
+    fence_match = re.search(r"```(?:json|python)?\s*(\{.*?\})\s*```", section, flags=re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except Exception:
+            pass
+
+    indented_lines: list[str] = []
+    collecting = False
+    for line in section.splitlines():
+        if re.match(r"^\s{4,}\{", line):
+            collecting = True
+        if collecting:
+            if line.startswith("    ") or line.startswith("\t") or not line.strip():
+                indented_lines.append(line[4:] if line.startswith("    ") else line.lstrip("\t"))
+                continue
+            break
+    if indented_lines:
+        try:
+            return json.loads("\n".join(indented_lines))
+        except Exception:
+            return {}
+
+    return {}
+
+
+def _extract_feature_descriptions(section: str) -> dict[str, str]:
+    descriptions: dict[str, str] = {}
+    if not section:
+        return descriptions
+
+    for line in section.splitlines():
+        bullet = re.match(r"^\s*-\s*`?([a-zA-Z0-9_]+)`?\s*[—-]\s*(.+)$", line)
+        if bullet:
+            descriptions[bullet.group(1)] = _strip_markdown(bullet.group(2))
+
+    rows = [line for line in section.splitlines() if line.strip().startswith("|")]
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] not in {"#", "---", "Feature"} and not cells[0].startswith("---"):
+            key = cells[1].strip("` ")
+            description = _strip_markdown(cells[2])
+            if key and re.fullmatch(r"[a-zA-Z0-9_]+", key):
+                descriptions[key] = description
+
+    return descriptions
+
+
+def _extract_inline_input_shape(text: str) -> tuple[str, str]:
+    key_match = re.search(r"input\s*[:\-]\s*([a-zA-Z0-9_]+)", text, flags=re.IGNORECASE)
+    shape_match = re.search(r"shape\s*\\?\[\s*1\s*,\s*(\d+)\s*\\?\]", text, flags=re.IGNORECASE)
+    return (
+        key_match.group(1) if key_match else "features",
+        f"[1, {shape_match.group(1)}]" if shape_match else "[1, 1]",
+    )
+
+
+def _extract_inline_output_keys(text: str) -> list[str]:
+    normalized = text.replace("\\_", "_")
+    match = re.search(r"output\s*[:\-]\s*([a-zA-Z0-9_]+)", normalized, flags=re.IGNORECASE)
+    if match:
+        return [match.group(1)]
+    return []
+
+
+def _extract_inline_features(text: str) -> dict[str, str]:
+    normalized = text.replace("\\_", "_")
+    features: dict[str, str] = {}
+    for line in normalized.splitlines():
+        feature_match = re.match(r"^\s*(?:\\?\[\d+\]|[\[\(]?\d+[\]\)]?)\s*([a-zA-Z0-9_]+)\s+(.+)$", line.strip())
+        if feature_match:
+            key = feature_match.group(1)
+            description = _strip_markdown(feature_match.group(2))
+            features[key] = description
+    return features
+
+
+def _extract_inline_sample_input(text: str, feature_descriptions: dict[str, str]) -> dict[str, Any]:
+    normalized = text.replace("\\_", "_").replace("\\[", "[").replace("\\]", "]")
+    samples = re.findall(r'\{"features":\s*\[\[(.*?)\]\]\}', normalized)
+    if not samples:
+        return {}
+
+    raw_values = [part.strip() for part in samples[0].split(",")]
+    values: list[Any] = []
+    for item in raw_values:
+        lowered = item.lower()
+        if lowered in {"true", "false"}:
+            values.append(lowered == "true")
+            continue
+        try:
+            number = float(item)
+            if number.is_integer():
+                values.append(int(number))
+            else:
+                values.append(number)
+        except Exception:
+            values.append(item)
+
+    keys = list(feature_descriptions.keys())
+    if not keys:
+        keys = [f"feature_{index}" for index in range(len(values))]
+
+    return {key: values[index] for index, key in enumerate(keys[: len(values)])}
+
+
+def _extract_input_key(text: str) -> str:
+    match = re.search(r'model_input\s*=\s*\{\s*"([^"]+)"\s*:', text)
+    if match:
+        return match.group(1)
+    return "features"
+
+
+def _extract_input_shape(text: str, sample_input: dict[str, Any]) -> str:
+    match = re.search(r"shape\s*\[1,\s*(\d+)\]", text, flags=re.IGNORECASE)
+    if match:
+        return f"[1, {match.group(1)}]"
+    return f"[1, {max(len(sample_input), 1)}]"
+
+
+def _infer_field_kind(value: Any) -> Literal["number", "boolean", "text"]:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return "number"
+    return "text"
+
+
+def _placeholder_for_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _build_remote_model_definition(payload: dict[str, Any]) -> ModelDefinition:
+    description = str(payload.get("description") or "")
+    sections = _markdown_sections(description)
+    sample_input = _extract_json_object(_section_by_names(sections, "input schema", "sample input"))
+    output_schema = _extract_json_object(_section_by_names(sections, "output schema", "sample output"))
+    feature_descriptions = _extract_feature_descriptions(_section_by_names(sections, "input features", "input feature"))
+    inline_feature_descriptions = _extract_inline_features(description)
+    if not feature_descriptions:
+        feature_descriptions = inline_feature_descriptions
+    if not sample_input:
+        sample_input = _extract_inline_sample_input(description, feature_descriptions)
+    if not output_schema:
+        inline_output_keys = _extract_inline_output_keys(description)
+        if inline_output_keys:
+            output_schema = {key: None for key in inline_output_keys}
+
+    summary = ""
+    for block in re.split(r"\n\s*\n", description):
+        cleaned = _strip_markdown(block)
+        if cleaned and not cleaned.startswith(payload.get("name", "")):
+            summary = cleaned
+            break
+
+    input_fields = [
+        InputField(
+            key=key,
+            label=_humanize_key(key),
+            kind=_infer_field_kind(value),
+            description=feature_descriptions.get(key) or f"Input required by the Hub model for {key}.",
+            placeholder=_placeholder_for_value(value),
+        )
+        for key, value in sample_input.items()
+    ]
+
+    what_it_does = summary or f"Runs the Hub model {payload.get('name', 'Custom Model')}."
+    what_you_need = [field.description for field in input_fields[:6]] or ["Review the model description and provide the required inputs."]
+    result_keys = list(output_schema.keys()) or ["generic_score", "verdict", "summary"]
+    what_result_means = [f"{_humanize_key(key)} is part of the model output." for key in result_keys[:4]]
+    next_steps = [
+        "Fill the inferred input fields from the model description.",
+        "Use sample values first if you need to understand the expected format.",
+        "Review the output keys to see how this model reports its result.",
+    ]
+
+    model_name = str(payload.get("name") or "custom-hub-model")
+    author = str(payload.get("authorUsername") or "unknown")
+    detected_task_type = str(payload.get("taskName") or "Hub Model")
+    input_key, input_shape = _extract_inline_input_shape(description)
+    if not sample_input and input_shape == "[1, 1]" and input_fields:
+        input_shape = f"[1, {len(input_fields)}]"
+    if sample_input and output_schema and input_fields:
+        schema_confidence: Literal["high", "medium", "low"] = "high"
+    elif sample_input or input_fields or output_schema:
+        schema_confidence = "medium"
+    else:
+        schema_confidence = "low"
+    return ModelDefinition(
+        slug=_slugify_model_name(model_name),
+        title=model_name.replace("-", " "),
+        owner=author,
+        hub_url=f"https://hub.opengradient.ai/models/{author}/{model_name}",
+        model_cid=str(payload.get("llmPath") or "HUB_DYNAMIC"),
+        category=detected_task_type,
+        summary=summary or f"Custom model resolved from the OpenGradient Hub page for {model_name}.",
+        input_key=_extract_input_key(description) if 'model_input' in description else input_key,
+        input_shape=_extract_input_shape(description, sample_input) if 'shape [' in description.lower() else input_shape,
+        result_keys=result_keys,
+        input_fields=input_fields,
+        sample_input=sample_input,
+        guide=ModelGuide(
+            what_it_does=what_it_does,
+            what_you_need=what_you_need,
+            what_result_means=what_result_means,
+            next_steps=next_steps,
+        ),
+        source="hub_dynamic",
+        schema_confidence=schema_confidence,
+        detected_task_type=detected_task_type,
+    )
 
 
 def resolve_model(model_ref: str) -> ModelDefinition:
@@ -605,6 +901,14 @@ def resolve_model(model_ref: str) -> ModelDefinition:
             return model
         if re.search(re.escape(model.model_cid), normalized):
             return model
+
+    hub_ref = _parse_hub_model_ref(normalized)
+    if hub_ref:
+        author, name = hub_ref
+        try:
+            return _fetch_remote_model_definition(author, name)
+        except requests.RequestException as exc:
+            raise KeyError(f"Custom hub model could not be resolved: {exc}") from exc
 
     raise KeyError(f"Unknown model reference: {model_ref}")
 
@@ -2062,6 +2366,45 @@ def _shape_nft_result(model_output: dict[str, Any], values: dict[str, Any]) -> d
     }
 
 
+def _shape_generic_result(model: ModelDefinition, model_output: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    if model_output:
+        generic = {key: _scalarize(value) for key, value in model_output.items()}
+    else:
+        generic = {}
+
+    numeric_values = [
+        float(value)
+        for value in values.values()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if numeric_values:
+        normalized = []
+        for value in numeric_values[:12]:
+            if 0 <= value <= 1:
+                normalized.append(value * 100)
+            elif value <= 100:
+                normalized.append(value)
+            else:
+                normalized.append(min(100.0, np.log10(value + 1) * 18))
+        generic_score = round(float(sum(normalized) / max(len(normalized), 1)), 1)
+    else:
+        generic_score = 50.0
+
+    score_key = next((key for key in model.result_keys if "score" in key.lower()), None)
+    if score_key and score_key not in generic:
+        generic[score_key] = generic_score
+    if "generic_score" not in generic and not any("score" in key.lower() for key in generic):
+        generic["generic_score"] = generic_score
+    if not any(key.lower() in {"verdict", "grade", "label", "risk_category"} for key in generic):
+        generic["verdict"] = "high signal" if generic_score >= 67 else "mixed signal" if generic_score >= 34 else "low signal"
+    if "summary" not in generic:
+        generic["summary"] = (
+            f"Generic fallback result for {model.title}. Review the model-specific output keys and inputs because this Hub model is not part of the curated OG Runner shape set."
+        )
+
+    return generic
+
+
 def _build_explanation(model: ModelDefinition, result: dict[str, Any]) -> str:
     if model.slug == "governance-capture-risk-scorer":
         score = result["governance_capture_risk_score"]
@@ -2095,9 +2438,15 @@ def _build_explanation(model: ModelDefinition, result: dict[str, Any]) -> str:
             f"This stablecoin currently sits at {result['alert']} with a depeg risk score of {result['depeg_risk_score']}. "
             f"The four pillar scores tell you whether the problem is reserves, market behavior, liquidity, or wallet-flight velocity."
         )
+    if model.slug == "nft-wash-trading-detector":
+        return (
+            f"This NFT transaction scores {result['wash_probability']} wash probability and is currently classified as {result['verdict']}. "
+            f"Wallet overlap and abnormal trading cadence are the main signals to inspect first."
+        )
     return (
-        f"This NFT transaction scores {result['wash_probability']} wash probability and is currently classified as {result['verdict']}. "
-        f"Wallet overlap and abnormal trading cadence are the main signals to inspect first."
+        f"{model.title} is running as a custom Hub model. "
+        f"The runner inferred its inputs and outputs from the Hub description, so use the model-specific fields and review the returned keys directly. "
+        f"Current output keys: {', '.join(list(result.keys())[:6]) or 'generic_score, verdict, summary'}."
     )
 
 
@@ -2234,7 +2583,9 @@ def _shape_result(model: ModelDefinition, model_output: dict[str, Any], values: 
         return _shape_dex_liquidity_exit_result(model_output, values)
     if model.slug == "stablecoin-depeg-risk-monitor":
         return _shape_stablecoin_result(model_output, values)
-    return _shape_nft_result(model_output, values)
+    if model.slug == "nft-wash-trading-detector":
+        return _shape_nft_result(model_output, values)
+    return _shape_generic_result(model, model_output, values)
 
 
 def run_demo(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:

@@ -29,6 +29,9 @@ type ModelDefinition = {
   input_fields: InputField[]
   sample_input: Record<string, number | string | boolean>
   guide: Guide
+  source?: 'curated' | 'hub_dynamic'
+  schema_confidence?: 'high' | 'medium' | 'low'
+  detected_task_type?: string | null
 }
 
 type ResolveResponse = {
@@ -110,17 +113,8 @@ type ProtocolPreviewResponse = {
 }
 
 type BridgeSortKey = 'risk_score' | 'tvl_usd' | 'prior_incidents'
-type ViewTab = 'runner' | 'protocol' | 'assistant' | 'leaderboard'
-type AssistantResponse = {
-  answer: string
-  source: 'opengradient_llm' | 'local_fallback'
-  model_used: string | null
-}
-
-type AssistantModelsResponse = {
-  current_model: string
-  models: string[]
-}
+type LeaderboardFilter = 'all' | 'governance' | 'bridge' | 'stablecoin' | 'dex' | 'nft' | 'health'
+type ViewTab = 'runner' | 'protocol' | 'leaderboard'
 
 const defaultModelRef = 'https://hub.opengradient.ai/models/Goldy/Governance-Capture-Risk-Scorer'
 const defaultTargetUrl = ''
@@ -241,6 +235,7 @@ function App() {
   const [globalLeaderboard, setGlobalLeaderboard] = useState<LeaderboardEntry[]>([])
   const [modelUsage, setModelUsage] = useState<ModelUsageStat[]>([])
   const [bridgeSort, setBridgeSort] = useState<BridgeSortKey>('risk_score')
+  const [leaderboardFilter, setLeaderboardFilter] = useState<LeaderboardFilter>('all')
   const [activeTab, setActiveTab] = useState<ViewTab>('runner')
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -252,25 +247,21 @@ function App() {
   const [hasUserInteracted, setHasUserInteracted] = useState(false)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [walletPreflight, setWalletPreflight] = useState<WalletPreflightResponse | null>(null)
-  const [assistantPrompt, setAssistantPrompt] = useState('')
-  const [assistantAnswer, setAssistantAnswer] = useState<string | null>(null)
-  const [assistantSource, setAssistantSource] = useState<AssistantResponse['source'] | null>(null)
-  const [assistantLoading, setAssistantLoading] = useState(false)
-  const [assistantModel, setAssistantModel] = useState('GPT_5_MINI')
-  const [assistantModels, setAssistantModels] = useState<string[]>(['GPT_5_MINI'])
   const [protocolPreview, setProtocolPreview] = useState<ProtocolPreviewResponse | null>(null)
   const [protocolPreviewLoading, setProtocolPreviewLoading] = useState(false)
+  const [debouncedTargetUrl, setDebouncedTargetUrl] = useState(defaultTargetUrl)
+  const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({})
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
+  const previousModelSlugRef = useRef<string | null>(null)
 
   const selectedModelOption = models.some((item) => item.hub_url === modelRef) ? modelRef : '__custom__'
-  const hasProtocolUrl = Boolean(normalizePreviewUrl(targetUrl))
+  const hasProtocolUrl = isLikelyProtocolUrl(model, debouncedTargetUrl)
 
   useEffect(() => {
     void loadModels()
     void resolveModel(defaultModelRef, { silent: true })
     void loadGlobalLeaderboard()
     void loadBackendStatus()
-    void loadAssistantModels()
   }, [])
 
   useEffect(() => {
@@ -283,13 +274,54 @@ function App() {
   }, [model])
 
   useEffect(() => {
+    if (!model) {
+      previousModelSlugRef.current = null
+      setInputValues({})
+      return
+    }
+
+    const nextValues: Record<string, string | boolean> = {}
+    Object.entries(model.sample_input ?? {}).forEach(([key, value]) => {
+      nextValues[key] = typeof value === 'boolean' ? value : String(value)
+    })
+    setInputValues(nextValues)
+
+    const previousSlug = previousModelSlugRef.current
+    const switchedModels = previousSlug !== null && previousSlug !== model.slug
+    if (switchedModels && isCustomHubModel(model) && model.input_fields.length > 0) {
+      setTargetUrl('')
+      setDebouncedTargetUrl('')
+      setProtocolPreview(null)
+      if (activeTab === 'protocol') {
+        setActiveTab('runner')
+      }
+    }
+
+    previousModelSlugRef.current = model.slug
+  }, [activeTab, model])
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedTargetUrl(targetUrl)
+    }, 350)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [targetUrl])
+
+  useEffect(() => {
     if (!hasProtocolUrl && activeTab === 'protocol') {
       setActiveTab('runner')
     }
   }, [activeTab, hasProtocolUrl])
 
   useEffect(() => {
-    const normalizedUrl = normalizePreviewUrl(targetUrl)
+    if (!isLikelyProtocolUrl(model, debouncedTargetUrl)) {
+      setProtocolPreview(null)
+      setProtocolPreviewLoading(false)
+      return
+    }
+
+    const normalizedUrl = normalizePreviewUrl(model, debouncedTargetUrl)
     if (!normalizedUrl) {
       setProtocolPreview(null)
       setProtocolPreviewLoading(false)
@@ -323,7 +355,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [targetUrl])
+  }, [debouncedTargetUrl, model])
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
@@ -450,21 +482,6 @@ function App() {
     }
   }
 
-  async function loadAssistantModels() {
-    try {
-      const response = await fetch(apiUrl('/api/assistant/models'))
-      if (!response.ok) {
-        throw new Error('Assistant models failed to load.')
-      }
-      const payload = (await response.json()) as AssistantModelsResponse
-      setAssistantModels(payload.models.length > 0 ? payload.models : ['GPT_5_MINI'])
-      setAssistantModel(payload.current_model || 'GPT_5_MINI')
-    } catch {
-      setAssistantModels(['GPT_5_MINI'])
-      setAssistantModel('GPT_5_MINI')
-    }
-  }
-
   async function runModel() {
     setHasUserInteracted(true)
     setActiveTab('runner')
@@ -474,8 +491,12 @@ function App() {
       return
     }
 
-    if (!targetUrl.trim()) {
-      setError('Protocol URL is required.')
+    const manualInputs = buildManualInputs(model, inputValues)
+    const customHubModel = isCustomHubModel(model)
+    const runMode = customHubModel && model.input_fields.length > 0 ? 'manual' : 'url'
+
+    if (runMode === 'url' && !targetUrl.trim()) {
+      setError(`${getTargetFieldLabel(model)} is required.`)
       return
     }
 
@@ -489,8 +510,9 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model_ref: modelRef,
-          mode: 'url',
-          target_url: normalizePreviewUrl(targetUrl),
+          mode: runMode,
+          target_url: targetUrl.trim() ? normalizePreviewUrl(model, targetUrl) : undefined,
+          inputs: manualInputs,
         }),
       })
 
@@ -552,7 +574,6 @@ function App() {
                   {([
                     ['runner', 'Runner'],
                     ...(hasProtocolUrl ? ([['protocol', 'Protocol']] as const) : []),
-                    ['assistant', 'Assistant'],
                     ['leaderboard', 'Leaderboard'],
                   ] as const).map(([value, label]) => (
                     <button
@@ -683,8 +704,66 @@ function App() {
                         </>
                       ) : null}
 
+                      {model && isCustomHubModel(model) && model.input_fields.length > 0 ? (
+                        <div className="inline-note inline-note-compact">
+                          <span className="inline-note-key">Model-defined inputs</span>
+                          <span>
+                            This Hub model is not part of the OG Runner presets. The fields below were inferred from the model description on OpenGradient Hub.
+                          </span>
+                        </div>
+                      ) : null}
+
+                      {model && isCustomHubModel(model) ? <ModelIngredientsPanel model={model} /> : null}
+
+                      {model && isCustomHubModel(model) && model.input_fields.length > 0 ? (
+                        <div className="field-stack">
+                          <div className="action-row action-row-compact">
+                            <button
+                              className="screen-button screen-button-muted"
+                              onClick={() => setInputValues(buildSampleInputValues(model))}
+                              type="button"
+                            >
+                              Use sample values
+                            </button>
+                          </div>
+
+                          {model.input_fields.map((field) => (
+                            <label key={field.key} className="field-shell">
+                              <span className="field-label">{field.label}</span>
+                              {field.kind === 'boolean' ? (
+                                <button
+                                  className={`choice-chip ${inputValues[field.key] ? 'choice-chip-active' : ''}`}
+                                  onClick={() =>
+                                    setInputValues((current) => ({
+                                      ...current,
+                                      [field.key]: !current[field.key],
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {inputValues[field.key] ? 'True' : 'False'}
+                                </button>
+                              ) : (
+                                <input
+                                  className="screen-input"
+                                  value={String(inputValues[field.key] ?? '')}
+                                  onChange={(event) =>
+                                    setInputValues((current) => ({
+                                      ...current,
+                                      [field.key]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={field.placeholder ?? field.description}
+                                />
+                              )}
+                              <span className="field-help">{field.description}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : null}
+
                       <label className="field-shell">
-                        <span className="field-label">Protocol URL</span>
+                        <span className="field-label">{getTargetFieldLabel(model)}</span>
                         <input
                           className="screen-input"
                           value={targetUrl}
@@ -692,6 +771,14 @@ function App() {
                           placeholder={getTargetHint(model)}
                         />
                       </label>
+
+                      <div className="inline-note inline-note-compact inline-note-tight">
+                        <span className="inline-note-key">Target input</span>
+                        <span>{getTargetInputGuide(model)}</span>
+                        {isLikelyProtocolUrl(model, targetUrl) ? (
+                          <span>Protocol tab is ready. Open it to inspect the page preview and metadata.</span>
+                        ) : null}
+                      </div>
 
                       {model ? (
                         <div className="inline-note inline-note-tight">
@@ -726,73 +813,12 @@ function App() {
                       <StatusSummary health={health} walletPreflight={walletPreflight} />
                     </div>
 
-                    <RunnerPreviewPanel model={model} runResult={runResult} targetUrl={targetUrl} protocolPreview={protocolPreview} />
+                    <RunnerPreviewPanel model={model} runResult={runResult} targetUrl={debouncedTargetUrl} protocolPreview={protocolPreview} />
                   </div>
                 ) : null}
 
                 {activeTab === 'protocol' && hasProtocolUrl ? (
-                  <ProtocolViewport url={targetUrl} preview={protocolPreview} loading={protocolPreviewLoading} />
-                ) : null}
-
-                {activeTab === 'assistant' ? (
-                  <AssistantTab
-                    prompt={assistantPrompt}
-                    answer={assistantAnswer}
-                    source={assistantSource}
-                    loading={assistantLoading}
-                    assistantModel={assistantModel}
-                    assistantModels={assistantModels}
-                    model={model}
-                    runResult={runResult}
-                    targetUrl={targetUrl}
-                    onPromptChange={setAssistantPrompt}
-                    onAssistantModelChange={setAssistantModel}
-                    onSubmit={async (message) => {
-                      setAssistantLoading(true)
-                      setAssistantAnswer(null)
-                      setAssistantSource(null)
-                      setError(null)
-
-                      try {
-                        const response = await fetch(apiUrl('/api/assistant'), {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            message,
-                            model_ref: modelRef || undefined,
-                            llm_model: assistantModel,
-                            target_url: normalizePreviewUrl(targetUrl) || undefined,
-                            result: runResult?.result ?? {},
-                          }),
-                        })
-
-                        if (!response.ok) {
-                          throw new Error('Assistant did not return an answer.')
-                        }
-
-                        const payload = (await response.json()) as AssistantResponse
-                        setAssistantAnswer(payload.answer)
-                        setAssistantSource(payload.source)
-                        if (payload.model_used) {
-                          setAssistantModel(payload.model_used)
-                        }
-                        await loadBackendStatus()
-                      } catch (err) {
-                        setAssistantAnswer(
-                          buildLocalAssistantFallback({
-                            message,
-                            model,
-                            runResult,
-                            targetUrl,
-                          }),
-                        )
-                        setAssistantSource('local_fallback')
-                        setError(err instanceof Error ? err.message : 'Assistant request failed.')
-                      } finally {
-                        setAssistantLoading(false)
-                      }
-                    }}
-                  />
+                  <ProtocolViewport key={`${model?.slug ?? 'unknown'}-${debouncedTargetUrl}`} model={model} url={debouncedTargetUrl} preview={protocolPreview} loading={protocolPreviewLoading} />
                 ) : null}
 
                 {activeTab === 'leaderboard' ? (
@@ -801,7 +827,9 @@ function App() {
                     modelUsage={modelUsage}
                     bridgeEntries={bridgeLeaderboard}
                     currentRun={runResult}
+                    filter={leaderboardFilter}
                     sortKey={bridgeSort}
+                    onFilterChange={setLeaderboardFilter}
                     onSortChange={setBridgeSort}
                     showBridgeBoard={model?.slug === 'cross-chain-bridge-risk-classifier' && bridgeLeaderboard.length > 0}
                   />
@@ -841,22 +869,22 @@ function StatusSummary({
           {liveReady ? 'Inference live' : 'Inference fallback'}
         </span>
         <span className={`context-chip ${llmReady ? 'context-chip-ok' : 'context-chip-warn'}`}>
-          {llmReady ? 'LLM live' : 'LLM fallback'}
+          {llmReady ? 'Explanation live' : 'Explanation fallback'}
         </span>
       </div>
-      {walletPreflight?.wallet_address ? (
-        <span className="status-summary-copy">
-          Wallet {shortWallet(walletPreflight.wallet_address)} · ETH {formatCompactNumber(walletPreflight.base_sepolia_eth)} · OPG{' '}
-          {formatCompactNumber(walletPreflight.opg_balance)}
-        </span>
-      ) : null}
       <span className="status-summary-copy">{getLiveStatusCopy(liveReady, llmReady, issues)}</span>
     </div>
   )
 }
 
-function SiteBackdrop({ url }: { url: string }) {
-  const normalizedUrl = normalizePreviewUrl(url)
+function SiteBackdrop({
+  model,
+  url,
+}: {
+  model: ModelDefinition | null
+  url: string
+}) {
+  const normalizedUrl = normalizePreviewUrl(model, url)
   const host = getHostLabel(normalizedUrl)
   const proxiedUrl = normalizedUrl ? `${apiUrl('/api/protocol/render')}?url=${encodeURIComponent(normalizedUrl)}` : ''
 
@@ -954,13 +982,19 @@ function BridgeLeaderboardPanel({
           >
             <span className="leaderboard-order">#{index + 1}</span>
             <div className="leaderboard-copy">
-              <strong>{entry.name}</strong>
+              <div className="leaderboard-title-row">
+                <strong>{entry.name}</strong>
+                <span className="activity-tag">{entry.source === 'user' ? 'User run' : 'Curated'}</span>
+              </div>
               <small>
-                {entry.source === 'user' ? 'User run' : 'Curated profile'} · {entry.summary}
+                {entry.summary}
                 {entry.created_at ? ` · ${formatRelativeTime(entry.created_at)}` : ''}
               </small>
             </div>
-            <ScoreBadge score={String(entry.result.risk_score ?? '-')} label={String(entry.result.risk_category ?? '-')} />
+            <div className="activity-score-block">
+              <span className="activity-score-caption">Risk score</span>
+              <ScoreBadge score={String(entry.result.risk_score ?? '-')} label={String(entry.result.risk_category ?? '-')} />
+            </div>
           </a>
         ))}
       </div>
@@ -971,12 +1005,18 @@ function BridgeLeaderboardPanel({
 function GlobalLeaderboardPanel({
   entries,
   modelUsage,
+  filter,
+  onFilterChange,
 }: {
   entries: LeaderboardEntry[]
   modelUsage: ModelUsageStat[]
+  filter: LeaderboardFilter
+  onFilterChange: (value: LeaderboardFilter) => void
 }) {
-  const activeModelCount = new Set(entries.map((entry) => entry.model_slug).filter(Boolean)).size
-  const activeSiteCount = new Set(entries.map((entry) => entry.protocol_url)).size
+  const filteredEntries = entries.filter((entry) => matchesLeaderboardFilter(entry, filter))
+  const activeModelCount = new Set(filteredEntries.map((entry) => entry.model_slug).filter(Boolean)).size
+  const activeSiteCount = new Set(filteredEntries.map((entry) => entry.protocol_url)).size
+  const filteredUsage = modelUsage.filter((item) => matchesModelUsageFilter(item, filter, filteredEntries))
 
   return (
     <div className="activity-shell">
@@ -987,11 +1027,31 @@ function GlobalLeaderboardPanel({
             <p className="activity-subtitle">What people just ran across OG models.</p>
           </div>
           <span className="activity-count">
-            {entries.length} runs / {activeModelCount || 0} models
+            {filteredEntries.length} runs / {activeModelCount || 0} models
           </span>
         </div>
+        <div className="chip-row">
+          {([
+            ['all', 'All'],
+            ['governance', 'Governance'],
+            ['bridge', 'Bridge'],
+            ['stablecoin', 'Stablecoin'],
+            ['dex', 'DEX'],
+            ['nft', 'NFT'],
+            ['health', 'Health'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              className={`choice-chip ${filter === value ? 'choice-chip-active' : ''}`}
+              onClick={() => onFilterChange(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="activity-list">
-          {entries.slice(0, 4).map((entry, index) => (
+          {filteredEntries.slice(0, 4).map((entry, index) => (
             <a
               key={`${entry.created_at ?? 'saved'}-${entry.name}-${entry.protocol_url}-${index}`}
               className="activity-item"
@@ -1001,20 +1061,25 @@ function GlobalLeaderboardPanel({
             >
               <span className="activity-order">#{index + 1}</span>
               <div className="activity-copy">
-                <strong>{entry.name}</strong>
+                <div className="leaderboard-title-row">
+                  <strong>{entry.name}</strong>
+                  <span className="activity-tag">{entry.source === 'user' ? 'User run' : 'Curated'}</span>
+                </div>
                 <small>{entry.model_title ?? 'Saved run'}</small>
                 <div className="activity-tags">
                   <span className="activity-tag">{entry.model_category ?? 'Unknown model'}</span>
-                  <span className="activity-tag">{entry.source === 'user' ? 'User run' : 'Curated'}</span>
+                  {entry.created_at ? <span className="activity-tag">{formatRelativeTime(entry.created_at)}</span> : null}
                 </div>
               </div>
-              <div className="activity-side">
-                <ScoreBadge score={entry.headline_score} label={entry.headline_label} />
-                <span className="activity-time">{entry.created_at ? formatRelativeTime(entry.created_at) : 'saved'}</span>
+              <div className="activity-side activity-side-strong">
+                <div className="activity-score-block">
+                  <span className="activity-score-caption">Score</span>
+                  <ScoreBadge score={entry.headline_score} label={entry.headline_label} />
+                </div>
               </div>
             </a>
           ))}
-          {entries.length === 0 ? <p className="activity-empty">No saved runs yet.</p> : null}
+          {filteredEntries.length === 0 ? <p className="activity-empty">No saved runs in this category yet.</p> : null}
         </div>
       </div>
 
@@ -1027,7 +1092,7 @@ function GlobalLeaderboardPanel({
           <span className="activity-count">{activeSiteCount} sites</span>
         </div>
         <div className="usage-pills">
-          {modelUsage.slice(0, 5).map((item) => (
+          {filteredUsage.slice(0, 5).map((item) => (
             <div key={item.model_slug} className="usage-pill">
               <strong>{shortTitle(item.model_title)}</strong>
               <span>{item.runs} runs</span>
@@ -1035,13 +1100,13 @@ function GlobalLeaderboardPanel({
                 <span
                   className="usage-meter-fill"
                   style={{
-                    width: `${Math.max(18, Math.min(100, (item.runs / Math.max(modelUsage[0]?.runs ?? 1, 1)) * 100))}%`,
+                    width: `${Math.max(18, Math.min(100, (item.runs / Math.max(filteredUsage[0]?.runs ?? 1, 1)) * 100))}%`,
                   }}
                 />
               </div>
             </div>
           ))}
-          {modelUsage.length === 0 ? <p className="activity-empty">Usage stats will appear after people run models.</p> : null}
+          {filteredUsage.length === 0 ? <p className="activity-empty">Usage stats will appear after people run models.</p> : null}
         </div>
       </div>
     </div>
@@ -1059,9 +1124,12 @@ function RunnerPreviewPanel({
   targetUrl: string
   protocolPreview: ProtocolPreviewResponse | null
 }) {
+  const targetLabel = getTargetDisplayValue(model, targetUrl)
+  const sourceLabel = getResultSourceLabel(model)
+
   return (
     <div className="screen-output screen-preview-panel">
-      <SiteBackdrop url={targetUrl} />
+      <SiteBackdrop model={model} url={targetUrl} />
       <div className="preview-shade" />
 
       <div className="preview-content">
@@ -1077,7 +1145,7 @@ function RunnerPreviewPanel({
 
                 <div className="result-meta-panels">
                   <StatCard label="Mode" value={runResult.execution_mode} />
-                  <StatCard label="Site" value={getHostLabel(normalizePreviewUrl(targetUrl))} />
+                  <StatCard label={sourceLabel} value={targetLabel} />
                 </div>
               </div>
 
@@ -1091,8 +1159,8 @@ function RunnerPreviewPanel({
                   <strong>{getScoreMeta(model, runResult.result)}</strong>
                 </div>
                 <div className="result-summary-chip">
-                  <span className="panel-kicker">Source</span>
-                  <strong>{getHostLabel(normalizePreviewUrl(targetUrl))}</strong>
+                  <span className="panel-kicker">{sourceLabel}</span>
+                  <strong>{targetLabel}</strong>
                 </div>
               </div>
             </div>
@@ -1148,31 +1216,86 @@ function RunnerPreviewPanel({
 }
 
 function ProtocolViewport({
+  model,
   url,
   preview,
   loading,
 }: {
+  model: ModelDefinition | null
   url: string
   preview: ProtocolPreviewResponse | null
   loading: boolean
 }) {
   const embedBlocked = preview ? !preview.embed_allowed : false
+  const [protocolView, setProtocolView] = useState<'preview' | 'metadata'>('preview')
+  const normalizedUrl = normalizePreviewUrl(model, url)
 
   return (
     <div className="protocol-shell">
-      <div className="screen-output screen-preview-panel protocol-panel">
-        <SiteBackdrop url={url} />
-        <div className="preview-shade" />
-        <div className="preview-content protocol-panel-copy">
-          <div className="protocol-panel-note">
-            <p className="panel-kicker">Protocol</p>
-            <p>
-              {embedBlocked
-                ? 'This protocol blocks direct embedding, so the runner is showing a proxied static preview instead.'
-                : 'This panel shows the live protocol page the model is analyzing in the background.'}
-            </p>
-          </div>
+      <div className="protocol-main">
+        <div className="chip-row protocol-view-row">
+          {([
+            ['preview', embedBlocked ? 'Static preview' : 'Live preview'],
+            ['metadata', 'Metadata'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              className={`choice-chip ${protocolView === value ? 'choice-chip-active' : ''}`}
+              onClick={() => setProtocolView(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+          <a className="choice-chip protocol-live-link" href={normalizedUrl} target="_blank" rel="noreferrer">
+            Open live
+          </a>
         </div>
+
+        {protocolView === 'preview' ? (
+          <div className="screen-output screen-preview-panel protocol-panel">
+            <SiteBackdrop model={model} url={url} />
+            <div className="preview-shade" />
+            <div className="preview-content protocol-panel-copy">
+              <div className="protocol-panel-note">
+                <p className="panel-kicker">Protocol</p>
+                <p>
+                  {embedBlocked
+                    ? 'This protocol blocks direct embedding, so the runner is showing a proxied static preview instead.'
+                    : 'This panel shows the protocol page inside the runner so you can verify what the model is reading.'}
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="protocol-metadata-shell">
+            <div className="protocol-preview-card protocol-preview-card-wide">
+              <p className="panel-kicker">Protocol metadata</p>
+              {loading ? (
+                <p className="protocol-preview-copy">Loading protocol metadata...</p>
+              ) : (
+                <>
+                  <div className="protocol-preview-head">
+                    <div>
+                      <strong>{preview?.title ?? getTargetDisplayValue(model, url)}</strong>
+                      <span>{preview?.site_name ?? preview?.host ?? getHostLabel(normalizedUrl)}</span>
+                    </div>
+                    <div className="context-chip-row">
+                      <span className={`context-chip ${embedBlocked ? 'context-chip-warn' : 'context-chip-ok'}`}>
+                        {embedBlocked ? 'Static preview' : 'Live preview'}
+                      </span>
+                      <span className="context-chip">{preview?.status_code ? `HTTP ${preview.status_code}` : 'Metadata loaded'}</span>
+                    </div>
+                  </div>
+                  {preview?.image_url ? <img className="protocol-preview-image" src={preview.image_url} alt={preview.title ?? 'Protocol preview'} /> : null}
+                  <p className="protocol-preview-copy">
+                    {preview?.description ?? 'No metadata description is available for this protocol page.'}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="protocol-preview-card">
@@ -1183,13 +1306,14 @@ function ProtocolViewport({
           <>
             <div className="protocol-preview-head">
               <div>
-                <strong>{preview?.title ?? getHostLabel(normalizePreviewUrl(url))}</strong>
-                <span>{preview?.site_name ?? preview?.host ?? getHostLabel(normalizePreviewUrl(url))}</span>
+                <strong>{preview?.title ?? getTargetDisplayValue(model, url)}</strong>
+                <span>{preview?.site_name ?? preview?.host ?? getHostLabel(normalizedUrl)}</span>
               </div>
               <div className="context-chip-row">
                 <span className={`context-chip ${embedBlocked ? 'context-chip-warn' : 'context-chip-ok'}`}>
                   {embedBlocked ? 'Static preview' : 'Live preview'}
                 </span>
+                <span className="context-chip">{preview?.status_code ? `HTTP ${preview.status_code}` : 'Metadata loaded'}</span>
               </div>
             </div>
 
@@ -1200,10 +1324,10 @@ function ProtocolViewport({
             </p>
 
             <div className="protocol-preview-actions">
-              <a className="screen-button protocol-preview-button" href={normalizePreviewUrl(url)} target="_blank" rel="noreferrer">
+              <a className="screen-button protocol-preview-button" href={normalizedUrl} target="_blank" rel="noreferrer">
                 Open protocol
               </a>
-              <span className="protocol-preview-host">{preview?.host ?? getHostLabel(normalizePreviewUrl(url))}</span>
+              <span className="protocol-preview-host">{preview?.host ?? getHostLabel(normalizedUrl)}</span>
             </div>
           </>
         )}
@@ -1240,155 +1364,15 @@ function ScoreBadge({
   )
 }
 
-function AssistantTab({
-  prompt,
-  answer,
-  source,
-  loading,
-  assistantModel,
-  assistantModels,
-  model,
-  runResult,
-  targetUrl,
-  onPromptChange,
-  onAssistantModelChange,
-  onSubmit,
-}: {
-  prompt: string
-  answer: string | null
-  source: AssistantResponse['source'] | null
-  loading: boolean
-  assistantModel: string
-  assistantModels: string[]
-  model: ModelDefinition | null
-  runResult: RunResponse | null
-  targetUrl: string
-  onPromptChange: (value: string) => void
-  onAssistantModelChange: (value: string) => void
-  onSubmit: (message: string) => Promise<void>
-}) {
-  const suggestions = buildAssistantSuggestions(model, runResult, targetUrl)
-
-  return (
-    <div className="assistant-shell">
-      <div className="assistant-panel">
-        <div className="assistant-head">
-          <div>
-            <p className="panel-kicker">OpenGradient assistant</p>
-            <h3>Ask the runner what a model does, what to paste, and how to read the result.</h3>
-          </div>
-          <div className="context-chip-row">
-            <span className={`context-chip ${source === 'opengradient_llm' ? 'context-chip-ok' : 'context-chip-warn'}`}>
-              {source === 'opengradient_llm' ? 'LLM live' : 'Assistant ready'}
-            </span>
-          </div>
-        </div>
-
-        <div className="assistant-prompt-row">
-          <label className="field-shell">
-            <span className="field-label">OpenGradient LLM</span>
-            <select className="screen-input assistant-model-select" value={assistantModel} onChange={(event) => onAssistantModelChange(event.target.value)}>
-              {assistantModels.map((item) => (
-                <option key={item} value={item}>
-                  {formatLlmModelLabel(item)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <textarea
-            className="screen-input assistant-input"
-            value={prompt}
-            onChange={(event) => onPromptChange(event.target.value)}
-            placeholder="Ask about a model, a protocol URL, or the latest score."
-          />
-          <button
-            className="screen-button"
-            onClick={() => void onSubmit((prompt || suggestions[0]).trim())}
-            disabled={loading}
-            type="button"
-          >
-            {loading ? 'Thinking...' : 'Ask assistant'}
-          </button>
-        </div>
-
-        <div className="assistant-suggestions">
-          {suggestions.map((suggestion) => (
-            <button key={suggestion} className="choice-chip" onClick={() => onPromptChange(suggestion)} type="button">
-              {suggestion}
-            </button>
-          ))}
-        </div>
-
-        <div className="assistant-context-grid">
-          <div className="inline-note inline-note-tight">
-            <span className="inline-note-key">Current model</span>
-            <span>{model ? `${shortTitle(model.title)} · ${model.category}` : 'Choose a model to ground the assistant.'}</span>
-          </div>
-          <div className="inline-note inline-note-tight">
-            <span className="inline-note-key">Current target</span>
-            <span>{targetUrl ? getHostLabel(normalizePreviewUrl(targetUrl)) : 'Paste a protocol page to add site context.'}</span>
-          </div>
-          <div className="inline-note inline-note-tight">
-            <span className="inline-note-key">Current result</span>
-            <span>{runResult && model ? `${getHeadlineScore(model, runResult.result)} · ${getScoreMeta(model, runResult.result)}` : 'Run a model to ask about the score.'}</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="assistant-panel assistant-answer-panel">
-        <p className="panel-kicker">Assistant output</p>
-        {answer ? (
-          <>
-            <AssistantAnswerPanel answer={answer} model={model} runResult={runResult} targetUrl={targetUrl} />
-            <div className="context-chip-row">
-              <span className={`context-chip ${source === 'opengradient_llm' ? 'context-chip-ok' : 'context-chip-warn'}`}>
-                {source === 'opengradient_llm' ? 'Powered by OpenGradient LLM' : 'Using local fallback'}
-              </span>
-              <span className="context-chip">{formatLlmModelLabel(assistantModel)}</span>
-            </div>
-          </>
-        ) : (
-          <div className="empty-state assistant-empty-state">
-            <p className="panel-kicker">Ready</p>
-            <p>The assistant can explain what each model measures, suggest the right protocol page, and translate the score into plain English.</p>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function AssistantAnswerPanel({
-  answer,
-  model,
-  runResult,
-  targetUrl,
-}: {
-  answer: string
-  model: ModelDefinition | null
-  runResult: RunResponse | null
-  targetUrl: string
-}) {
-  const sections = buildAssistantSections(answer, model, runResult, targetUrl)
-
-  return (
-    <div className="assistant-answer-grid">
-      {sections.map((section) => (
-        <div key={section.label} className="assistant-answer-card">
-          <p className="panel-kicker">{section.label}</p>
-          <p className="assistant-answer">{section.copy}</p>
-        </div>
-      ))}
-    </div>
-  )
-}
 
 function LeaderboardTab({
   entries,
   modelUsage,
   bridgeEntries,
   currentRun,
+  filter,
   sortKey,
+  onFilterChange,
   onSortChange,
   showBridgeBoard,
 }: {
@@ -1396,14 +1380,16 @@ function LeaderboardTab({
   modelUsage: ModelUsageStat[]
   bridgeEntries: LeaderboardEntry[]
   currentRun: RunResponse | null
+  filter: LeaderboardFilter
   sortKey: BridgeSortKey
+  onFilterChange: (value: LeaderboardFilter) => void
   onSortChange: (value: BridgeSortKey) => void
   showBridgeBoard: boolean
 }) {
   return (
     <div className="leaderboard-tab">
       <div className="leaderboard-tab-panel">
-        <GlobalLeaderboardPanel entries={entries} modelUsage={modelUsage} />
+        <GlobalLeaderboardPanel entries={entries} modelUsage={modelUsage} filter={filter} onFilterChange={onFilterChange} />
       </div>
 
       {showBridgeBoard ? (
@@ -1416,6 +1402,44 @@ function LeaderboardTab({
           />
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function ModelIngredientsPanel({ model }: { model: ModelDefinition }) {
+  const confidenceTone =
+    model.schema_confidence === 'high'
+      ? 'context-chip-ok'
+      : model.schema_confidence === 'medium'
+        ? 'context-chip-warn'
+        : 'context-chip'
+
+  return (
+    <div className="inline-note ingredients-panel">
+      <div className="inline-note-head">
+        <span className="inline-note-key">Model ingredients</span>
+        <div className="context-chip-row">
+          <span className="context-chip">{model.source === 'hub_dynamic' ? 'Hub model' : 'Curated model'}</span>
+          <span className={`context-chip ${confidenceTone}`}>Schema {model.schema_confidence ?? 'unknown'}</span>
+        </div>
+      </div>
+
+      <div className="context-chip-row">
+        <span className="context-chip">Task: {model.detected_task_type ?? model.category}</span>
+        <span className="context-chip">Input key: {model.input_key}</span>
+        <span className="context-chip">Shape: {model.input_shape}</span>
+      </div>
+
+      <div className="ingredients-grid">
+        <div className="ingredients-card">
+          <span className="inline-note-key">Inputs</span>
+          <span>{model.input_fields.length > 0 ? model.input_fields.map((field) => field.key).slice(0, 8).join(', ') : 'No structured input fields were extracted from the Hub description.'}</span>
+        </div>
+        <div className="ingredients-card">
+          <span className="inline-note-key">Outputs</span>
+          <span>{model.result_keys.length > 0 ? model.result_keys.slice(0, 8).join(', ') : 'No output schema was extracted from the Hub description.'}</span>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1461,7 +1485,7 @@ function getHeadlineScore(model: ModelDefinition, result: Record<string, unknown
     case 'nft-wash-trading-detector':
       return `${Math.round(Number(result.wash_probability ?? 0) * 100)}%`
     default:
-      return '-'
+      return getGenericHeadlineScore(result)
   }
 }
 
@@ -1480,7 +1504,7 @@ function getScoreMeta(model: ModelDefinition, result: Record<string, unknown>) {
     case 'nft-wash-trading-detector':
       return String(result.verdict ?? '-')
     default:
-      return model.title
+      return getGenericHeadlineLabel(result)
   }
 }
 
@@ -1521,7 +1545,10 @@ function getScoreDetails(model: ModelDefinition, result: Record<string, unknown>
     return [['Signal', 'Wallet overlap and trade cadence']]
   }
 
-  return []
+  return Object.entries(result)
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 4)
+    .map(([key, value]) => [_humanizeLabel(key), String(value)])
 }
 
 function getParameterScaleEntries(model: ModelDefinition, result: Record<string, unknown>): [string, number, string][] {
@@ -1555,7 +1582,10 @@ function getParameterScaleEntries(model: ModelDefinition, result: Record<string,
     return [['wash probability', value, `${value}%`]]
   }
 
-  return [] as [string, number, string][]
+  return Object.entries(result)
+    .filter(([, value]) => typeof value === 'number')
+    .slice(0, 6)
+    .map(([key, value]) => [_humanizeLabel(key), clampPercent(Number(value)), String(value)] as [string, number, string])
 }
 
 function summarizeWarnings(warnings: string[]) {
@@ -1585,7 +1615,7 @@ function summarizeWarnings(warnings: string[]) {
 
 function getLiveStatusCopy(liveReady: boolean, llmReady: boolean, issues: string[]) {
   if (liveReady && llmReady) {
-    return 'Wallet, inference, and assistant routes are ready for OpenGradient live execution.'
+    return 'Inference and explanation routes are ready for OpenGradient live execution.'
   }
 
   if (issues.length > 0) {
@@ -1600,143 +1630,30 @@ function getLiveStatusCopy(liveReady: boolean, llmReady: boolean, issues: string
     return 'Inference is currently falling back to the local path while wallet and Hub context stay available.'
   }
 
-  return 'The assistant is currently falling back to local copy while inference stays available.'
+  return 'The score explanation is currently falling back to local copy while inference stays available.'
 }
 
-function buildLocalAssistantFallback({
-  message,
-  model,
-  runResult,
-  targetUrl,
-}: {
-  message: string
-  model: ModelDefinition | null
-  runResult: RunResponse | null
-  targetUrl: string
-}) {
-  const normalizedMessage = message.trim().toLowerCase()
-  const host = targetUrl ? getHostLabel(normalizePreviewUrl(targetUrl)) : null
-
-  if (model && (normalizedMessage.includes('what') || normalizedMessage.includes('model') || normalizedMessage.includes('measure'))) {
-    return `${shortTitle(model.title)} measures ${model.summary} ${model.guide.what_it_does}`
+function matchesLeaderboardFilter(entry: LeaderboardEntry, filter: LeaderboardFilter) {
+  if (filter === 'all') {
+    return true
   }
 
-  if (model && host && !runResult) {
-    return `Use ${shortTitle(model.title)} for ${host}. Paste the protocol page, run the analysis, and the runner will return ${getModelOutputLabel(model).toLowerCase()} plus the main parameter scales.`
-  }
-
-  if (model && runResult) {
-    return `${shortTitle(model.title)} scored ${getHeadlineScore(model, runResult.result)} for ${host ?? 'the current target'}, with verdict ${getScoreMeta(model, runResult.result)}. The strongest visible drivers are shown in the parameter scales and detail cards in the Runner tab.`
-  }
-
-  if (normalizedMessage.includes('bridge')) {
-    return 'Use Cross-Chain Bridge Risk Classifier for bridge pages. It scores custody risk, technical verification, operations, liquidity design, and incident history.'
-  }
-
-  if (normalizedMessage.includes('stablecoin') || normalizedMessage.includes('depeg')) {
-    return 'Use Stablecoin Depeg Risk Monitor for stablecoin or issuer pages. It focuses on reserve adequacy, market stress, liquidity depth, and on-chain velocity.'
-  }
-
-  if (normalizedMessage.includes('dex') || normalizedMessage.includes('liquidity')) {
-    return 'Use DEX Liquidity Exit Risk Scorer for DEX or AMM pages. It evaluates LP concentration, emissions dependence, flow stress, and slippage resilience.'
-  }
-
-  if (normalizedMessage.includes('nft')) {
-    return 'Use NFT Wash Trading Detector for collection, marketplace, or wallet pages. It flags suspicious wallet overlap and trading cadence.'
-  }
-
-  return 'The assistant is using local fallback right now. Choose a model, paste a protocol URL, and ask what the model measures, what page to use, or why the current score was assigned.'
+  const category = String(entry.model_category ?? '').toLowerCase()
+  if (filter === 'governance') return category.includes('governance')
+  if (filter === 'bridge') return category.includes('bridge')
+  if (filter === 'stablecoin') return category.includes('stablecoin')
+  if (filter === 'dex') return category.includes('dex')
+  if (filter === 'nft') return category.includes('nft')
+  if (filter === 'health') return category.includes('health') || category.includes('protocol')
+  return true
 }
 
-function buildAssistantSections(
-  answer: string,
-  model: ModelDefinition | null,
-  runResult: RunResponse | null,
-  targetUrl: string,
-) {
-  const sections: { label: string; copy: string }[] = []
-  const host = targetUrl ? getHostLabel(normalizePreviewUrl(targetUrl)) : null
-
-  if (model) {
-    sections.push({
-      label: 'What it does',
-      copy: `${shortTitle(model.title)} measures ${model.summary}`,
-    })
+function matchesModelUsageFilter(item: ModelUsageStat, filter: LeaderboardFilter, filteredEntries: LeaderboardEntry[]) {
+  if (filter === 'all') {
+    return true
   }
 
-  if (host) {
-    sections.push({
-      label: 'Current target',
-      copy: `The current protocol context is ${host}. Use the protocol page that best represents the product, governance, bridge, or market surface you want scored.`,
-    })
-  }
-
-  if (model && runResult) {
-    sections.push({
-      label: 'Current read',
-      copy: `${shortTitle(model.title)} scored ${getHeadlineScore(model, runResult.result)} with verdict ${getScoreMeta(model, runResult.result)} for ${host ?? 'the current target'}. Review the parameter scales to see the strongest drivers.`,
-    })
-  }
-
-  sections.push({
-    label: 'Assistant note',
-    copy: answer,
-  })
-
-  return sections
-}
-
-function buildAssistantSuggestions(
-  model: ModelDefinition | null,
-  runResult: RunResponse | null,
-  targetUrl: string,
-) {
-  const host = targetUrl ? getHostLabel(normalizePreviewUrl(targetUrl)) : null
-  const suggestions: string[] = []
-
-  if (!model) {
-    return [
-      'Help me choose the right OpenGradient model.',
-      'Find a model for bridge, DEX, or stablecoin risk.',
-      'Which protocol page should I paste for the cleanest analysis?',
-    ]
-  }
-
-  suggestions.push(`Explain what ${shortTitle(model.title)} is measuring.`)
-
-  if (host) {
-    suggestions.push(`Which ${getModelTargetLabel(model)} should I use for ${host}?`)
-  } else {
-    suggestions.push(`Which ${getModelTargetLabel(model)} should I paste for the cleanest run?`)
-  }
-
-  if (runResult) {
-    suggestions.push(`Why did ${shortTitle(model.title)} return ${getHeadlineScore(model, runResult.result)} and ${getScoreMeta(model, runResult.result)}?`)
-  }
-
-  if (model.slug.includes('bridge')) {
-    suggestions.push(host ? `What makes ${host} safer or riskier as a bridge?` : 'Which bridge design signals matter most: custody, timelock, verification, or incidents?')
-  } else if (model.slug.includes('governance')) {
-    suggestions.push(host ? `What governance weaknesses should I check first on ${host}?` : 'Which governance signals matter most: concentration, quorum fragility, insider control, or flashloan exposure?')
-  } else if (model.slug.includes('stablecoin')) {
-    suggestions.push(host ? `What depeg triggers should I watch first on ${host}?` : 'Which stablecoin signals matter most: reserves, liquidity, market stress, or on-chain velocity?')
-  } else if (model.slug.includes('dex')) {
-    suggestions.push(host ? `What liquidity exit risks should I check first on ${host}?` : 'Which DEX signals matter most: LP concentration, emissions dependence, slippage, or whale exits?')
-  } else if (model.slug.includes('nft')) {
-    suggestions.push(host ? `What wash trading signals should I inspect first on ${host}?` : 'Which NFT signals matter most: wallet overlap, timing, prior activity, or price behavior?')
-  } else if (model.slug.includes('health')) {
-    suggestions.push(host ? `What protocol health risks should I inspect first on ${host}?` : 'Which protocol health pillars matter most: TVL health, security, decentralization, activity, or treasury?')
-  }
-
-  return [...new Set(suggestions)].slice(0, 4)
-}
-
-function formatLlmModelLabel(value: string) {
-  return value
-    .split('_')
-    .filter(Boolean)
-    .map((part) => (part.length <= 3 ? part.toUpperCase() : `${part[0]}${part.slice(1).toLowerCase()}`))
-    .join(' ')
+  return filteredEntries.some((entry) => entry.model_slug === item.model_slug)
 }
 
 function toDisplayPercentEntries(record: Record<string, number>) {
@@ -1752,45 +1669,187 @@ function clampPercent(value: number) {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
+function isCustomHubModel(model: ModelDefinition) {
+  return !fallbackModels.some((item) => item.slug === model.slug)
+}
+
+function buildSampleInputValues(model: ModelDefinition) {
+  const values: Record<string, string | boolean> = {}
+  Object.entries(model.sample_input ?? {}).forEach(([key, value]) => {
+    values[key] = typeof value === 'boolean' ? value : String(value)
+  })
+  return values
+}
+
+function buildManualInputs(model: ModelDefinition | null, values: Record<string, string | boolean>) {
+  if (!model) {
+    return {}
+  }
+
+  const normalized: Record<string, string | number | boolean> = {}
+  model.input_fields.forEach((field) => {
+    const rawValue = values[field.key]
+    if (rawValue === undefined || rawValue === null || rawValue === '') {
+      return
+    }
+
+    if (field.kind === 'boolean') {
+      normalized[field.key] = Boolean(rawValue)
+      return
+    }
+
+    if (field.kind === 'number') {
+      const parsed = Number(rawValue)
+      if (Number.isFinite(parsed)) {
+        normalized[field.key] = parsed
+      }
+      return
+    }
+
+    normalized[field.key] = String(rawValue)
+  })
+  return normalized
+}
+
+function _humanizeLabel(value: string) {
+  return value.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function getGenericHeadlineScore(result: Record<string, unknown>) {
+  const scoredEntry = Object.entries(result).find(([key, value]) => typeof value === 'number' && key.toLowerCase().includes('score'))
+  if (scoredEntry) {
+    return String(scoredEntry[1])
+  }
+
+  const numericEntry = Object.entries(result).find(([, value]) => typeof value === 'number')
+  if (numericEntry) {
+    return String(numericEntry[1])
+  }
+
+  return '-'
+}
+
+function getGenericHeadlineLabel(result: Record<string, unknown>) {
+  const labelEntry = Object.entries(result).find(([key]) =>
+    ['label', 'grade', 'verdict', 'category', 'alert'].some((needle) => key.toLowerCase().includes(needle)),
+  )
+  if (labelEntry) {
+    return String(labelEntry[1])
+  }
+  return 'Custom model output'
+}
+
+function getTargetFieldLabel(model: ModelDefinition | null) {
+  if (!model) {
+    return 'Target URL'
+  }
+
+  if (isCustomHubModel(model) && model.input_fields.length > 0) {
+    return 'Optional reference URL'
+  }
+
+  if (model.slug.includes('stablecoin')) {
+    return 'Stablecoin contract or page'
+  }
+
+  if (model.slug.includes('nft')) {
+    return 'Collection address or page'
+  }
+
+  if (model.slug.includes('bridge')) {
+    return 'Bridge URL'
+  }
+
+  if (model.slug.includes('dex')) {
+    return 'DEX URL or pool page'
+  }
+
+  if (model.slug.includes('health')) {
+    return 'Protocol URL'
+  }
+
+  return 'Governance or protocol URL'
+}
+
 function getTargetHint(model: ModelDefinition | null) {
   if (!model) {
     return 'Paste the site you want the model to inspect.'
   }
 
+  if (isCustomHubModel(model) && model.input_fields.length > 0) {
+    return 'Optional: paste the page or reference link that matches this custom model.'
+  }
+
   if (model.slug.includes('bridge')) {
-    return 'Paste a bridge site.'
+    return 'Paste a bridge homepage, bridge app, or bridge docs page.'
   }
 
   if (model.slug.includes('stablecoin')) {
-    return 'Paste a stablecoin or issuer site.'
+    return 'Paste a stablecoin token contract, CoinGecko page, or issuer site.'
   }
 
   if (model.slug.includes('nft')) {
-    return 'Paste a collection, marketplace, or wallet page.'
+    return 'Paste a collection contract, OpenSea collection page, or marketplace listing.'
   }
 
   if (model.slug.includes('dex')) {
-    return 'Paste a DEX, AMM, or liquidity venue page.'
+    return 'Paste a DEX homepage, swap page, pool page, or liquidity venue.'
   }
 
   return 'Paste a DeFi, governance, or protocol site.'
 }
 
+function getTargetInputGuide(model: ModelDefinition | null) {
+  if (!model) {
+    return 'Paste the target page or contract you want the selected model to analyze.'
+  }
+
+  if (isCustomHubModel(model) && model.input_fields.length > 0) {
+    return 'This custom Hub model defines its own input schema. Fill the generated fields below. The target URL is optional and only adds page context.'
+  }
+
+  if (model.slug.includes('nft')) {
+    return 'For NFT analysis, paste the collection contract address, the collection page on OpenSea or another marketplace, or a direct collection URL.'
+  }
+
+  if (model.slug.includes('stablecoin')) {
+    return 'For stablecoin analysis, paste the token contract address, a stablecoin market page, or the issuer page for that specific coin.'
+  }
+
+  if (model.slug.includes('bridge')) {
+    return 'For bridge analysis, paste the bridge app, homepage, transfer page, or official docs page of that bridge.'
+  }
+
+  if (model.slug.includes('dex')) {
+    return 'For DEX analysis, paste the exchange, swap, pool, or liquidity page you want the model to inspect.'
+  }
+
+  if (model.slug.includes('health')) {
+    return 'For protocol health, paste the main protocol app, docs, or product page that best represents the protocol.'
+  }
+
+  return 'For governance analysis, paste the governance app, voting portal, docs page, or the main protocol page.'
+}
+
 function getModelTargetLabel(model: ModelDefinition) {
+  if (isCustomHubModel(model) && model.input_fields.length > 0) {
+    return 'model-defined input set'
+  }
+
   if (model.slug.includes('bridge')) {
     return 'bridge site'
   }
 
   if (model.slug.includes('stablecoin')) {
-    return 'stablecoin page'
+    return 'stablecoin contract or issuer page'
   }
 
   if (model.slug.includes('nft')) {
-    return 'NFT market page'
+    return 'NFT collection contract or marketplace page'
   }
 
   if (model.slug.includes('dex')) {
-    return 'DEX or liquidity page'
+    return 'DEX, pool, or liquidity page'
   }
 
   if (model.slug.includes('health')) {
@@ -1801,6 +1860,10 @@ function getModelTargetLabel(model: ModelDefinition) {
 }
 
 function getModelOutputLabel(model: ModelDefinition) {
+  if (isCustomHubModel(model)) {
+    return model.result_keys.length > 0 ? `${_humanizeLabel(model.result_keys[0])} output` : 'custom model output'
+  }
+
   if (model.slug.includes('bridge')) {
     return 'bridge risk result'
   }
@@ -1829,6 +1892,10 @@ function getRunLabel(model: ModelDefinition | null) {
     return 'Run analysis'
   }
 
+  if (isCustomHubModel(model)) {
+    return 'Run custom model'
+  }
+
   if (model.slug.includes('bridge')) {
     return 'Run bridge analysis'
   }
@@ -1855,6 +1922,10 @@ function getRunLabel(model: ModelDefinition | null) {
 function getRunningLabel(model: ModelDefinition | null) {
   if (!model) {
     return 'Running analysis...'
+  }
+
+  if (isCustomHubModel(model)) {
+    return 'Running custom model...'
   }
 
   if (model.slug.includes('bridge')) {
@@ -1888,26 +1959,31 @@ function shortWallet(value: string) {
   return `${value.slice(0, 6)}...${value.slice(-4)}`
 }
 
-function formatCompactNumber(value: number | null) {
-  if (value == null || Number.isNaN(value)) {
-    return '-'
-  }
-
-  if (value >= 1000) {
-    return `${Math.round(value)}`
-  }
-
-  if (value >= 1) {
-    return value.toFixed(2)
-  }
-
-  return value.toFixed(4)
+function isHexAddress(value: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(value.trim())
 }
 
-function normalizePreviewUrl(url: string) {
+function getAddressPreviewUrl(model: ModelDefinition | null, address: string) {
+  const normalized = address.trim()
+  if (model?.slug.includes('stablecoin')) {
+    return `https://etherscan.io/token/${normalized}`
+  }
+
+  if (model?.slug.includes('nft')) {
+    return `https://etherscan.io/token/${normalized}`
+  }
+
+  return `https://etherscan.io/address/${normalized}`
+}
+
+function normalizePreviewUrl(model: ModelDefinition | null, url: string) {
   const trimmed = url.trim()
   if (!trimmed) {
     return ''
+  }
+
+  if (isHexAddress(trimmed)) {
+    return getAddressPreviewUrl(model, trimmed)
   }
 
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
@@ -1917,12 +1993,67 @@ function normalizePreviewUrl(url: string) {
   return `https://${trimmed}`
 }
 
+function isLikelyProtocolUrl(model: ModelDefinition | null, url: string) {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (isHexAddress(trimmed)) {
+    return true
+  }
+
+  const normalized = normalizePreviewUrl(model, url)
+  if (!normalized) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    return Boolean(parsed.hostname && parsed.hostname.includes('.') && parsed.hostname.length > 3)
+  } catch {
+    return false
+  }
+}
+
 function getHostLabel(url: string) {
   try {
     return new URL(url).host.replace(/^www\./, '')
   } catch {
     return 'protocol site'
   }
+}
+
+function getTargetDisplayValue(model: ModelDefinition | null, value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    if (model && isCustomHubModel(model) && model.input_fields.length > 0) {
+      return 'model inputs'
+    }
+    return 'target'
+  }
+
+  if (isHexAddress(trimmed)) {
+    if (model?.slug.includes('stablecoin')) {
+      return `contract ${shortWallet(trimmed)}`
+    }
+
+    if (model?.slug.includes('nft')) {
+      return `collection ${shortWallet(trimmed)}`
+    }
+
+    return shortWallet(trimmed)
+  }
+
+  return getHostLabel(normalizePreviewUrl(model, trimmed))
+}
+
+function getResultSourceLabel(model: ModelDefinition | null) {
+  if (model && isCustomHubModel(model) && model.input_fields.length > 0) {
+    return 'Inputs'
+  }
+
+  return 'Target'
 }
 
 function sortBridgeEntries(entries: LeaderboardEntry[], sortKey: BridgeSortKey) {
