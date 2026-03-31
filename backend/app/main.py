@@ -102,9 +102,19 @@ def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
             execution = run_live(model, merged_inputs)
         except Exception as exc:
             _mark_live_inference_failure(exc)
+            if settings.og_live_strict:
+                raise RuntimeError(f"Live OpenGradient inference failed: {exc}") from exc
             execution = run_demo(model, merged_inputs)
             execution.warnings.append(f"Live OpenGradient inference failed, demo fallback used: {exc}")
     else:
+        if payload.mode != "demo" and settings.og_live_strict and settings.og_private_key and settings.og_enable_live_inference:
+            if _live_inference_cooldown_active():
+                raise RuntimeError(
+                    "Live OpenGradient inference is temporarily cooling down after a failed attempt."
+                )
+            if supports_live_inference():
+                raise RuntimeError("OpenGradient live inference is available but could not be executed.")
+            raise RuntimeError("OpenGradient SDK is unavailable in the backend runtime.")
         execution = run_demo(model, merged_inputs)
         if payload.mode != "demo":
             if _live_inference_cooldown_active():
@@ -237,7 +247,10 @@ async def run_model_endpoint(payload: RunModelRequest) -> RunModelResponse:
     if payload.mode == "demo":
         merged_inputs = model.sample_input
 
-    execution = _execute_model_run(model, payload, merged_inputs)
+    try:
+        execution = _execute_model_run(model, payload, merged_inputs)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     save_model_run(
         model=model,
@@ -251,7 +264,10 @@ async def run_model_endpoint(payload: RunModelRequest) -> RunModelResponse:
     if payload.compare_url:
         compare_inputs = dict(payload.inputs)
         compare_inputs["target_url"] = payload.compare_url
-        compare_execution = _execute_model_run(model, payload, compare_inputs)
+        try:
+            compare_execution = _execute_model_run(model, payload, compare_inputs)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         comparison.append(
             RunModelResponse(
                 model=model,
