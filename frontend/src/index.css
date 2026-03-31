@@ -461,6 +461,45 @@ input {
   gap: 0.35rem;
 }
 
+.matrix-grid-shell {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.matrix-grid-scroll {
+  overflow: auto;
+  border-radius: 0.82rem;
+  border: 1px solid rgba(206, 229, 249, 0.1);
+  background: rgba(8, 14, 25, 0.62);
+  padding: 0.38rem;
+}
+
+.matrix-grid-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+}
+
+.matrix-grid-table td {
+  padding: 0.12rem;
+}
+
+.matrix-cell-input {
+  width: 5.4rem;
+  border-radius: 0.58rem;
+  border: 1px solid rgba(206, 229, 249, 0.14);
+  background: rgba(6, 10, 19, 0.9);
+  color: #ecf7ff;
+  padding: 0.42rem 0.5rem;
+  font-size: 0.74rem;
+  outline: none;
+}
+
+.matrix-cell-input:focus {
+  border-color: rgba(36, 188, 227, 0.32);
+  box-shadow: 0 0 0 2px rgba(36, 188, 227, 0.08);
+}
+
 .picker-trigger {
   display: flex;
   align-items: center;

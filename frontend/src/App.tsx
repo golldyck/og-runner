@@ -264,6 +264,7 @@ function App() {
   const [protocolPreviewLoading, setProtocolPreviewLoading] = useState(false)
   const [debouncedTargetUrl, setDebouncedTargetUrl] = useState(defaultTargetUrl)
   const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({})
+  const [matrixGridView, setMatrixGridView] = useState<Record<string, boolean>>({})
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
   const previousModelSlugRef = useRef<string | null>(null)
 
@@ -293,11 +294,7 @@ function App() {
       return
     }
 
-    const nextValues: Record<string, string | boolean> = {}
-    Object.entries(model.sample_input ?? {}).forEach(([key, value]) => {
-      nextValues[key] = typeof value === 'boolean' ? value : String(value)
-    })
-    setInputValues(nextValues)
+    setInputValues(buildSampleInputValues(model))
 
     const previousSlug = previousModelSlugRef.current
     const switchedModels = previousSlug !== null && previousSlug !== model.slug
@@ -766,59 +763,111 @@ function App() {
                             </button>
                           </div>
 
-                          {model.input_fields.map((field) => (
-                            <label key={field.key} className="field-shell">
-                              <span className="field-label">
-                                {field.label}
-                                {isMatrixField(model, field) ? (
-                                  <span className="field-shape-tag">{getMatrixFieldHint(model, field)}</span>
-                                ) : null}
-                              </span>
-                              {field.kind === 'boolean' ? (
-                                <button
-                                  className={`choice-chip ${inputValues[field.key] ? 'choice-chip-active' : ''}`}
-                                  onClick={() =>
-                                    setInputValues((current) => ({
-                                      ...current,
-                                      [field.key]: !current[field.key],
-                                    }))
-                                  }
-                                  type="button"
-                                >
-                                  {inputValues[field.key] ? 'True' : 'False'}
-                                </button>
-                              ) : isMatrixField(model, field) ? (
-                                <>
-                                  <div className="matrix-tools">
-                                    <button
-                                      className="choice-chip"
-                                      type="button"
-                                      onClick={() => {
-                                        const raw = String(inputValues[field.key] ?? '')
-                                        const parsed = parseMatrixFromText(raw)
-                                        const shape = getMatrixFieldShape(model, field)
-                                        if (!parsed || !shape) {
-                                          return
+                          {model.input_fields.map((field) => {
+                            const isMatrix = isMatrixField(model, field)
+                            const rawMatrixValue = String(inputValues[field.key] ?? '')
+                            const parsedMatrix = isMatrix ? parseMatrixFromText(rawMatrixValue) : null
+                            const matrixGridEnabled = isMatrix ? (matrixGridView[field.key] ?? true) : false
+                            const matrixShape = isMatrix ? getMatrixFieldShape(model, field) : null
+
+                            return (
+                              <label key={field.key} className="field-shell">
+                                <span className="field-label">
+                                  {field.label}
+                                  {isMatrix ? (
+                                    <span className="field-shape-tag">{getMatrixFieldHint(model, field)}</span>
+                                  ) : null}
+                                </span>
+                                {field.kind === 'boolean' ? (
+                                  <button
+                                    className={`choice-chip ${inputValues[field.key] ? 'choice-chip-active' : ''}`}
+                                    onClick={() =>
+                                      setInputValues((current) => ({
+                                        ...current,
+                                        [field.key]: !current[field.key],
+                                      }))
+                                    }
+                                    type="button"
+                                  >
+                                    {inputValues[field.key] ? 'True' : 'False'}
+                                  </button>
+                                ) : isMatrix ? (
+                                  <>
+                                    <div className="matrix-tools">
+                                      <button
+                                        className={`choice-chip ${matrixGridEnabled ? 'choice-chip-active' : ''}`}
+                                        type="button"
+                                        onClick={() =>
+                                          setMatrixGridView((current) => ({
+                                            ...current,
+                                            [field.key]: !matrixGridEnabled,
+                                          }))
                                         }
-                                        const [rows, cols] = shape
-                                        const newRow = Array.from({ length: cols }, () => 0)
-                                        const next = parsed.slice(0, rows)
-                                        next.push(newRow)
-                                        setInputValues((current) => ({
-                                          ...current,
-                                          [field.key]: JSON.stringify(next, null, 2),
-                                        }))
-                                      }}
-                                    >
-                                      Add row
-                                    </button>
-                                    <button
-                                      className="choice-chip"
-                                      type="button"
-                                      onClick={async () => {
-                                        try {
-                                          const csv = await navigator.clipboard.readText()
-                                          const parsed = parseMatrixFromCsv(csv)
+                                      >
+                                        {matrixGridEnabled ? 'JSON view' : 'Grid view'}
+                                      </button>
+                                      <button
+                                        className="choice-chip"
+                                        type="button"
+                                        onClick={() => {
+                                          const parsed = parseMatrixFromText(rawMatrixValue)
+                                          const shape = getMatrixFieldShape(model, field)
+                                          if (!parsed || !shape) {
+                                            return
+                                          }
+                                          const [, cols] = shape
+                                          const next = [...parsed, Array.from({ length: cols }, () => 0)]
+                                          setInputValues((current) => ({
+                                            ...current,
+                                            [field.key]: JSON.stringify(next, null, 2),
+                                          }))
+                                        }}
+                                      >
+                                        Add row
+                                      </button>
+                                      <button
+                                        className="choice-chip"
+                                        type="button"
+                                        onClick={() => {
+                                          const parsed = parseMatrixFromText(rawMatrixValue)
+                                          if (!parsed || parsed.length <= 1) {
+                                            return
+                                          }
+                                          const next = parsed.slice(0, -1)
+                                          setInputValues((current) => ({
+                                            ...current,
+                                            [field.key]: JSON.stringify(next, null, 2),
+                                          }))
+                                        }}
+                                      >
+                                        Remove row
+                                      </button>
+                                      <button
+                                        className="choice-chip"
+                                        type="button"
+                                        onClick={async () => {
+                                          try {
+                                            const csv = await navigator.clipboard.readText()
+                                            const parsed = parseMatrixFromCsv(csv)
+                                            if (!parsed) {
+                                              return
+                                            }
+                                            setInputValues((current) => ({
+                                              ...current,
+                                              [field.key]: JSON.stringify(parsed, null, 2),
+                                            }))
+                                          } catch {
+                                            // Clipboard permission can be blocked by browser policy.
+                                          }
+                                        }}
+                                      >
+                                        Paste CSV
+                                      </button>
+                                      <button
+                                        className="choice-chip"
+                                        type="button"
+                                        onClick={() => {
+                                          const parsed = parseMatrixFromText(rawMatrixValue)
                                           if (!parsed) {
                                             return
                                           }
@@ -826,33 +875,73 @@ function App() {
                                             ...current,
                                             [field.key]: JSON.stringify(parsed, null, 2),
                                           }))
-                                        } catch {
-                                          // Clipboard permission can be blocked by browser policy.
+                                        }}
+                                      >
+                                        Format JSON
+                                      </button>
+                                    </div>
+                                    {matrixGridEnabled && parsedMatrix ? (
+                                      <div className="matrix-grid-shell">
+                                        <div className="matrix-grid-scroll">
+                                          <table className="matrix-grid-table">
+                                            <tbody>
+                                              {parsedMatrix.map((row, rowIndex) => (
+                                                <tr key={`${field.key}-r-${rowIndex}`}>
+                                                  {row.map((cell, colIndex) => (
+                                                    <td key={`${field.key}-r-${rowIndex}-c-${colIndex}`}>
+                                                      <input
+                                                        className="matrix-cell-input"
+                                                        type="number"
+                                                        step="any"
+                                                        value={String(cell)}
+                                                        onChange={(event) => {
+                                                          const parsedValue = Number(event.target.value)
+                                                          if (!Number.isFinite(parsedValue)) {
+                                                            return
+                                                          }
+                                                          const next = parsedMatrix.map((sourceRow) => [...sourceRow])
+                                                          next[rowIndex][colIndex] = parsedValue
+                                                          setInputValues((current) => ({
+                                                            ...current,
+                                                            [field.key]: JSON.stringify(next, null, 2),
+                                                          }))
+                                                        }}
+                                                      />
+                                                    </td>
+                                                  ))}
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                        {matrixShape ? (
+                                          <p className="field-help field-help-inline">
+                                            Grid editor is synced with JSON. Expected shape: {matrixShape[0]} x {matrixShape[1]}.
+                                          </p>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                    {matrixGridEnabled ? null : (
+                                      <textarea
+                                        className="screen-input screen-textarea"
+                                        value={rawMatrixValue}
+                                        onChange={(event) =>
+                                          setInputValues((current) => ({
+                                            ...current,
+                                            [field.key]: event.target.value,
+                                          }))
                                         }
-                                      }}
-                                    >
-                                      Paste CSV
-                                    </button>
-                                    <button
-                                      className="choice-chip"
-                                      type="button"
-                                      onClick={() => {
-                                        const raw = String(inputValues[field.key] ?? '')
-                                        const parsed = parseMatrixFromText(raw)
-                                        if (!parsed) {
-                                          return
-                                        }
-                                        setInputValues((current) => ({
-                                          ...current,
-                                          [field.key]: JSON.stringify(parsed, null, 2),
-                                        }))
-                                      }}
-                                    >
-                                      Format JSON
-                                    </button>
-                                  </div>
-                                  <textarea
-                                    className="screen-input screen-textarea"
+                                        placeholder={field.placeholder ?? field.description}
+                                        spellCheck={false}
+                                      />
+                                    )}
+                                    <p className="field-help field-help-inline">
+                                      {getMatrixFieldValidationMessage(model, field, rawMatrixValue)}
+                                    </p>
+                                  </>
+                                ) : (
+                                  <input
+                                    className="screen-input"
                                     value={String(inputValues[field.key] ?? '')}
                                     onChange={(event) =>
                                       setInputValues((current) => ({
@@ -861,28 +950,12 @@ function App() {
                                       }))
                                     }
                                     placeholder={field.placeholder ?? field.description}
-                                    spellCheck={false}
                                   />
-                                  <p className="field-help field-help-inline">
-                                    {getMatrixFieldValidationMessage(model, field, String(inputValues[field.key] ?? ''))}
-                                  </p>
-                                </>
-                              ) : (
-                                <input
-                                  className="screen-input"
-                                  value={String(inputValues[field.key] ?? '')}
-                                  onChange={(event) =>
-                                    setInputValues((current) => ({
-                                      ...current,
-                                      [field.key]: event.target.value,
-                                    }))
-                                  }
-                                  placeholder={field.placeholder ?? field.description}
-                                />
-                              )}
-                              <span className="field-help">{field.description}</span>
-                            </label>
-                          ))}
+                                )}
+                                <span className="field-help">{field.description}</span>
+                              </label>
+                            )
+                          })}
                         </div>
                       ) : null}
 
