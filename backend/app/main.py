@@ -1,10 +1,12 @@
 """FastAPI application entry point for OG Runner."""
 
+from pathlib import Path
 from time import monotonic
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.schemas import (
@@ -47,6 +49,9 @@ app = FastAPI(
     version=settings.api_version,
 )
 
+_FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend_dist"
+_FRONTEND_ASSETS_DIR = _FRONTEND_DIST_DIR / "assets"
+
 # CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -55,6 +60,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if _FRONTEND_ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS_DIR), name="assets")
 
 _LIVE_INFERENCE_COOLDOWN_SECONDS = 300
 _live_inference_cooldown_until = 0.0
@@ -253,3 +261,24 @@ async def assistant_endpoint(payload: AssistantRequest) -> AssistantResponse:
         llm_model=payload.llm_model,
     )
     return AssistantResponse(answer=answer, source=source, model_used=model_used)
+
+
+@app.get("/{full_path:path}")
+async def frontend_app(full_path: str):
+    """Serve the built frontend for Railway single-service deploys."""
+    if not _FRONTEND_DIST_DIR.exists():
+        raise HTTPException(status_code=404, detail="Frontend build is not available.")
+
+    requested = (_FRONTEND_DIST_DIR / full_path).resolve()
+    try:
+        requested.relative_to(_FRONTEND_DIST_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not found.") from exc
+
+    if full_path and requested.is_file():
+        return FileResponse(requested)
+
+    index_path = _FRONTEND_DIST_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend index is not available.")
+    return FileResponse(index_path)

@@ -76,30 +76,23 @@ Services:
 
 ## Railway Deploy
 
-Deploy this repo as two services in the same Railway project:
+This repo can be deployed to Railway as a single full-stack service from the repo root:
 
-- `backend`
-  Root directory: `/backend`
-  Config file: `/backend/railway.json`
-- `frontend`
-  Root directory: `/frontend`
-  Config file: `/frontend/railway.json`
+- root directory: `/`
+- config file: `/railway.json`
+- Dockerfile: `/Dockerfile`
 
-The frontend is the only service that needs a public domain. It proxies `/api` and `/health` to the private backend service over Railway private networking at `backend.railway.internal:8000`.
+The root Dockerfile builds the React frontend, copies the compiled assets into the Python image, and the FastAPI app serves both the API and the built frontend from one Railway service.
 
-Recommended backend variables on Railway:
+Recommended Railway variables:
 
-- `CORS_ORIGINS=["https://${{frontend.RAILWAY_PUBLIC_DOMAIN}}"]`
+- `CORS_ORIGINS=["https://${{RAILWAY_PUBLIC_DOMAIN}}"]`
 - `OG_PRIVATE_KEY=...`
 - `OG_ENABLE_LIVE_INFERENCE=false`
 - `OG_ENABLE_LIVE_LLM=false`
 - `OG_RPC_URL=https://ogevmdevnet.opengradient.ai`
 - `OG_API_URL=https://sdk-devnet.opengradient.ai`
 - `OG_INFERENCE_CONTRACT_ADDRESS=0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE`
-
-Recommended frontend variables on Railway:
-
-- none required when using the bundled Nginx proxy
 
 ## Environment
 
