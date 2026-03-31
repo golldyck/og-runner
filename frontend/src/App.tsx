@@ -270,6 +270,10 @@ function App() {
 
   const selectedModelOption = models.some((item) => item.hub_url === modelRef) ? modelRef : '__custom__'
   const hasProtocolUrl = isLikelyProtocolUrl(model, debouncedTargetUrl)
+  const matrixFields = model ? model.input_fields.filter((field) => isMatrixField(model, field)) : []
+  const hasMatrixFields = matrixFields.length > 0
+  const invalidMatrixFields = model ? getInvalidMatrixFields(model, inputValues) : []
+  const hasMatrixValidationError = invalidMatrixFields.length > 0
 
   useEffect(() => {
     void loadModels()
@@ -531,6 +535,10 @@ function App() {
 
     if (runMode === 'url' && !targetUrl.trim()) {
       setError(`${getTargetFieldLabel(model)} is required.`)
+      return
+    }
+    if (hasMatrixValidationError) {
+      setError(`Matrix validation failed for: ${invalidMatrixFields.join(', ')}. Fix input shape/data before running.`)
       return
     }
 
@@ -1001,7 +1009,22 @@ function App() {
                       ) : null}
 
                       <div className="action-row">
-                        <button className="screen-button" onClick={() => void runModel()} disabled={!model || running} type="button">
+                        {hasMatrixFields ? (
+                          <button
+                            className="screen-button screen-button-muted"
+                            onClick={() => {
+                              if (hasMatrixValidationError) {
+                                setError(`Matrix validation failed for: ${invalidMatrixFields.join(', ')}. Fix input shape/data before running.`)
+                              } else {
+                                setError(null)
+                              }
+                            }}
+                            type="button"
+                          >
+                            Validate inputs
+                          </button>
+                        ) : null}
+                        <button className="screen-button" onClick={() => void runModel()} disabled={!model || running || hasMatrixValidationError} type="button">
                           {running ? getRunningLabel(model) : getRunLabel(model)}
                         </button>
                       </div>
@@ -2019,6 +2042,27 @@ function getMatrixFieldValidationMessage(model: ModelDefinition, field: InputFie
     return `Parsed ${actualRows} x ${actualCols}. Expected ${expectedRows} x ${expectedCols}.`
   }
   return `Shape OK: ${actualRows} x ${actualCols}.`
+}
+
+function getInvalidMatrixFields(model: ModelDefinition, values: Record<string, string | boolean>) {
+  return model.input_fields
+    .filter((field) => isMatrixField(model, field))
+    .map((field) => ({
+      field,
+      raw: String(values[field.key] ?? ''),
+    }))
+    .filter(({ field, raw }) => {
+      const shape = getMatrixFieldShape(model, field)
+      const parsed = parseMatrixFromText(raw)
+      if (!shape || !parsed) {
+        return true
+      }
+      const [expectedRows, expectedCols] = shape
+      const rows = parsed.length
+      const cols = parsed[0]?.length ?? 0
+      return rows !== expectedRows || cols !== expectedCols
+    })
+    .map(({ field }) => field.label)
 }
 
 function parseMatrixFromText(raw: string): number[][] | null {
