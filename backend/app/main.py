@@ -49,7 +49,7 @@ app = FastAPI(
     version=settings.api_version,
 )
 
-_FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend_dist"
+_FRONTEND_DIST_DIR = Path(__file__).resolve().parents[1] / "frontend_dist"
 _FRONTEND_ASSETS_DIR = _FRONTEND_DIST_DIR / "assets"
 
 # CORS middleware for frontend
