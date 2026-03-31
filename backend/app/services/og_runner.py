@@ -44,6 +44,7 @@ _LLM_COOLDOWN_SECONDS = 300
 _llm_cooldown_until = 0.0
 _MARKET_CACHE_TTL_SECONDS = 300
 _market_cache: dict[str, tuple[float, Any]] = {}
+_ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
 
 
 def _number_field(key: str, label: str, description: str, placeholder: str) -> InputField:
@@ -1769,10 +1770,10 @@ def _build_nft_market_context(target_url: str | None, result: dict[str, Any]) ->
     return {"items": items, "notes": notes}
 
 
-def _get_alpha_client():
+def _get_alpha_client(*, rpc_url: str | None = None):
     return og.Alpha(
         private_key=settings.og_private_key,
-        rpc_url=settings.og_rpc_url,
+        rpc_url=rpc_url or settings.og_rpc_url,
         api_url=settings.og_api_url,
         inference_contract_address=settings.og_inference_contract_address,
     )
@@ -3346,15 +3347,38 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
     """Run real OpenGradient Alpha inference and map the output into OG Runner shape."""
     if not supports_live_inference():
         raise RuntimeError("OpenGradient live inference is not configured.")
+    if model.model_cid == "HUB_DYNAMIC":
+        raise RuntimeError("Live inference requires a concrete model CID; this Hub model did not expose one.")
 
     extracted_inputs, extraction_warnings = infer_inputs_from_url(model, inputs.get("target_url"))
     values = {**model.sample_input, **extracted_inputs, **inputs}
+    model_input = _build_live_model_input(model, values)
     alpha = _get_alpha_client()
-    inference_result = alpha.infer(
-        model_cid=model.model_cid,
-        inference_mode=og.InferenceMode.VANILLA,
-        model_input=_build_live_model_input(model, values),
-    )
+    inference_notes: list[str] = []
+    try:
+        inference_result = alpha.infer(
+            model_cid=model.model_cid,
+            inference_mode=og.InferenceMode.VANILLA,
+            model_input=model_input,
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        should_retry_on_alpha_rpc = (
+            "inferenceresult event not found" in message
+            and settings.og_rpc_url.strip().lower() != _ALPHA_RPC_FALLBACK_URL
+        )
+        if not should_retry_on_alpha_rpc:
+            raise
+
+        alpha = _get_alpha_client(rpc_url=_ALPHA_RPC_FALLBACK_URL)
+        inference_result = alpha.infer(
+            model_cid=model.model_cid,
+            inference_mode=og.InferenceMode.VANILLA,
+            model_input=model_input,
+        )
+        inference_notes.append(
+            "Inference retried on OpenGradient Alpha RPC (eth-devnet) after event parsing failure on the primary RPC."
+        )
     raw_output = _scalarize(inference_result.model_output)
     result = _shape_result(model, raw_output, values)
     explanation, explanation_source, _ = generate_assistant_answer(
@@ -3365,7 +3389,7 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
         target_url=inputs.get("target_url"),
     )
 
-    warnings: list[str] = extraction_warnings
+    warnings: list[str] = extraction_warnings + inference_notes
     if explanation_source == "local_fallback":
         if settings.og_private_key and not settings.og_enable_live_llm:
             warnings.append("OpenGradient LLM explanations are currently disabled in backend settings. Using local fallback.")
