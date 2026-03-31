@@ -1923,7 +1923,7 @@ function summarizeWarnings(warnings: string[]) {
     if (normalized.includes('llm explanations are currently disabled')) {
       return 'The score explanation is using local fallback copy because OpenGradient LLM mode is currently disabled.'
     }
-    if (normalized.includes('heuristic') || normalized.includes('demo')) {
+    if (normalized.includes('heuristic') || normalized.includes('fallback')) {
       return 'This result is based on a fallback extraction path, so it should be treated as directional rather than final.'
     }
 

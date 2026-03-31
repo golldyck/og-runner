@@ -106,7 +106,7 @@ def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
                 raise RuntimeError(f"Live OpenGradient inference failed: {exc}") from exc
             execution = run_demo(model, merged_inputs)
             execution.execution_mode = "fallback"
-            execution.warnings.append(f"Live OpenGradient inference failed, demo fallback used: {exc}")
+            execution.warnings.append(f"Live OpenGradient inference failed, local fallback used: {exc}")
     else:
         if payload.mode != "demo" and settings.og_live_strict and settings.og_private_key and settings.og_enable_live_inference:
             if _live_inference_cooldown_active():
