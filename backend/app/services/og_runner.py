@@ -36,7 +36,7 @@ class ExecutionResult:
     result: dict[str, Any]
     ai_explanation: str
     warnings: list[str]
-    execution_mode: Literal["live", "demo"]
+    execution_mode: Literal["live", "demo", "fallback"]
     transaction_hash: str | None = None
 
 
@@ -1118,10 +1118,6 @@ def build_market_context(
     items: list[dict[str, str | None]] = []
     notes: list[str] = []
 
-    tape_context = _build_binance_market_tape()
-    items.extend(tape_context["items"])
-    notes.extend(tape_context["notes"])
-
     if model.slug == "cross-chain-bridge-risk-classifier":
         bridge_context = _build_bridge_market_context(target_url, values)
         items.extend(bridge_context["items"])
@@ -1143,9 +1139,15 @@ def build_market_context(
         items.extend(nft_context["items"])
         notes.extend(nft_context["notes"])
 
-    sentiment_context = _build_polymarket_context(model, target_url)
-    items.extend(sentiment_context["items"])
-    notes.extend(sentiment_context["notes"])
+    if model.slug in {"stablecoin-depeg-risk-monitor", "dex-liquidity-exit-risk-scorer", "defi-protocol-health-score"}:
+        tape_context = _build_binance_market_tape()
+        items.extend(tape_context["items"])
+        notes.extend(tape_context["notes"])
+
+    if model.slug in {"stablecoin-depeg-risk-monitor", "cross-chain-bridge-risk-classifier"}:
+        sentiment_context = _build_polymarket_context(model, target_url)
+        items.extend(sentiment_context["items"])
+        notes.extend(sentiment_context["notes"])
 
     unique_notes = [note for note in dict.fromkeys(note for note in notes if note)]
     return {"items": items[:10], "notes": unique_notes[:4]}

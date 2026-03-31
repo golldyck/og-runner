@@ -103,7 +103,7 @@ class RunModelResponse(BaseModel):
     normalized_input: dict[str, Any]
     result: dict[str, Any]
     ai_explanation: str
-    execution_mode: Literal["live", "demo"]
+    execution_mode: Literal["live", "demo", "fallback"]
     transaction_hash: str | None = None
     warnings: list[str] = Field(default_factory=list)
     comparison: list["RunModelResponse"] = Field(default_factory=list)

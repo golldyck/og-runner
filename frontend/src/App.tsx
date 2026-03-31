@@ -80,7 +80,7 @@ type RunResponse = {
   normalized_input: Record<string, unknown>
   result: Record<string, unknown>
   ai_explanation: string
-  execution_mode: 'live' | 'demo'
+  execution_mode: 'live' | 'demo' | 'fallback'
   transaction_hash: string | null
   warnings: string[]
   comparison: RunResponse[]
