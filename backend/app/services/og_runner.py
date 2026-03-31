@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import re
 import threading
@@ -712,10 +713,12 @@ def _extract_feature_descriptions(section: str) -> dict[str, str]:
     rows = [line for line in section.splitlines() if line.strip().startswith("|")]
     for row in rows:
         cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
-        if len(cells) >= 3 and cells[0] not in {"#", "---", "Feature"} and not cells[0].startswith("---"):
-            key = cells[1].strip("` ")
-            description = _strip_markdown(cells[2])
-            if key and re.fullmatch(r"[a-zA-Z0-9_]+", key):
+        if len(cells) >= 3 and cells[0] not in {"#", "---", "Feature", "Tên"} and not cells[0].startswith("---"):
+            candidate_cells = [cells[0], cells[1]]
+            key = next((candidate.strip("` ") for candidate in candidate_cells if re.fullmatch(r"[a-zA-Z0-9_]+", candidate.strip("` "))), "")
+            description_cell = cells[2] if key == cells[0].strip("` ") else (cells[2] if len(cells) == 3 else cells[-1])
+            description = _strip_markdown(description_cell)
+            if key:
                 descriptions[key] = description
 
     return descriptions
@@ -724,17 +727,22 @@ def _extract_feature_descriptions(section: str) -> dict[str, str]:
 def _extract_inline_input_shape(text: str) -> tuple[str, str]:
     key_match = re.search(r"input\s*[:\-]\s*([a-zA-Z0-9_]+)", text, flags=re.IGNORECASE)
     shape_match = re.search(r"shape\s*\\?\[\s*1\s*,\s*(\d+)\s*\\?\]", text, flags=re.IGNORECASE)
+    tuple_shape_match = re.search(r"shape\s*[:\-]?\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?", text, flags=re.IGNORECASE)
     return (
         key_match.group(1) if key_match else "features",
-        f"[1, {shape_match.group(1)}]" if shape_match else "[1, 1]",
+        f"[1, {shape_match.group(1)}]" if shape_match else (f"[{tuple_shape_match.group(1)}, {tuple_shape_match.group(2)}]" if tuple_shape_match else "[1, 1]"),
     )
 
 
 def _extract_inline_output_keys(text: str) -> list[str]:
     normalized = text.replace("\\_", "_")
-    match = re.search(r"output\s*[:\-]\s*([a-zA-Z0-9_]+)", normalized, flags=re.IGNORECASE)
-    if match:
-        return [match.group(1)]
+    for line in normalized.splitlines():
+        match = re.match(r"^\s*output\s*[:\-]\s*([a-zA-Z0-9_]+)\s*$", line.strip(), flags=re.IGNORECASE)
+        if match:
+            return [match.group(1)]
+        model_output_match = re.search(r"([a-zA-Z0-9_]+)\s*=.*?#\s*Model output", line, flags=re.IGNORECASE)
+        if model_output_match:
+            return [model_output_match.group(1)]
     return []
 
 
@@ -783,6 +791,9 @@ def _extract_input_key(text: str) -> str:
     match = re.search(r'model_input\s*=\s*\{\s*"([^"]+)"\s*:', text)
     if match:
         return match.group(1)
+    variable_match = re.search(r"input\s+variable\s*[`'\":\- ]+([a-zA-Z0-9_]+)[`'\"]?", text, flags=re.IGNORECASE)
+    if variable_match:
+        return variable_match.group(1)
     return "features"
 
 
@@ -790,7 +801,42 @@ def _extract_input_shape(text: str, sample_input: dict[str, Any]) -> str:
     match = re.search(r"shape\s*\[1,\s*(\d+)\]", text, flags=re.IGNORECASE)
     if match:
         return f"[1, {match.group(1)}]"
+    tuple_match = re.search(r"shape\s*[:\-]?\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?", text, flags=re.IGNORECASE)
+    if tuple_match:
+        return f"[{tuple_match.group(1)}, {tuple_match.group(2)}]"
     return f"[1, {max(len(sample_input), 1)}]"
+
+
+def _extract_fenced_input_example(text: str) -> dict[str, Any]:
+    blocks = re.findall(r"```(?:json|python)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    for block in blocks:
+        cleaned = block
+        cleaned = re.sub(r"#.*", "", cleaned)
+        object_match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not object_match:
+            continue
+        try:
+            payload = json.loads(object_match.group(0))
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload:
+            return payload
+    return {}
+
+
+def _extract_standalone_matrix_input(text: str, input_key: str) -> dict[str, Any]:
+    blocks = re.findall(r"```(?:json|python)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    for block in blocks:
+        cleaned = re.sub(r"#.*", "", block).strip()
+        if not cleaned.startswith("[["):
+            continue
+        try:
+            payload = ast.literal_eval(cleaned)
+        except Exception:
+            continue
+        if isinstance(payload, list) and payload and isinstance(payload[0], list):
+            return {input_key: payload}
+    return {}
 
 
 def _infer_field_kind(value: Any) -> Literal["number", "boolean", "text"]:
@@ -818,6 +864,10 @@ def _build_remote_model_definition(payload: dict[str, Any]) -> ModelDefinition:
         feature_descriptions = inline_feature_descriptions
     if not sample_input:
         sample_input = _extract_inline_sample_input(description, feature_descriptions)
+    if not sample_input:
+        sample_input = _extract_fenced_input_example(description)
+    if not sample_input:
+        sample_input = _extract_standalone_matrix_input(description, _extract_input_key(description))
     if not output_schema:
         inline_output_keys = _extract_inline_output_keys(description)
         if inline_output_keys:
@@ -830,36 +880,68 @@ def _build_remote_model_definition(payload: dict[str, Any]) -> ModelDefinition:
             summary = cleaned
             break
 
-    input_fields = [
-        InputField(
-            key=key,
-            label=_humanize_key(key),
-            kind=_infer_field_kind(value),
-            description=feature_descriptions.get(key) or f"Input required by the Hub model for {key}.",
-            placeholder=_placeholder_for_value(value),
-        )
-        for key, value in sample_input.items()
-    ]
-
     what_it_does = summary or f"Runs the Hub model {payload.get('name', 'Custom Model')}."
+    model_name = str(payload.get("name") or "custom-hub-model")
+    author = str(payload.get("authorUsername") or "unknown")
+    detected_task_type = str(payload.get("taskName") or "Hub Model")
+    input_key, input_shape = _extract_inline_input_shape(description)
+    declared_input_key = _extract_input_key(description)
+    if declared_input_key and input_key == "features":
+        input_key = declared_input_key
+    if len(sample_input) == 1 and declared_input_key and declared_input_key not in sample_input:
+        only_value = next(iter(sample_input.values()))
+        sample_input = {declared_input_key: only_value}
+    if input_key == "features" and len(sample_input) == 1:
+        input_key = next(iter(sample_input.keys()))
+    if len(sample_input) == 1 and feature_descriptions:
+        only_value = next(iter(sample_input.values()))
+        if isinstance(only_value, list) and len(only_value) == 1 and isinstance(only_value[0], list):
+            row = only_value[0]
+            feature_keys = list(feature_descriptions.keys())
+            if len(feature_keys) == len(row):
+                sample_input = {key: row[index] for index, key in enumerate(feature_keys)}
+
+    if sample_input:
+        input_fields = [
+            InputField(
+                key=key,
+                label=_humanize_key(key),
+                kind=_infer_field_kind(value),
+                description=feature_descriptions.get(key) or f"Input required by the Hub model for {key}.",
+                placeholder=_placeholder_for_value(value),
+            )
+            for key, value in sample_input.items()
+        ]
+    else:
+        input_fields = [
+            InputField(
+                key=key,
+                label=_humanize_key(key),
+                kind="number",
+                description=description or f"Input required by the Hub model for {key}.",
+                placeholder="0",
+            )
+            for key, description in list(feature_descriptions.items())[:24]
+        ]
+
+    if not sample_input and input_shape == "[1, 1]" and input_fields:
+        input_shape = f"[1, {len(input_fields)}]"
+    if input_shape == "[1, 1]" and len(sample_input) == 1:
+        only_value = next(iter(sample_input.values()))
+        if isinstance(only_value, list) and only_value and isinstance(only_value[0], list):
+            input_shape = f"[{len(only_value)}, {len(only_value[0])}]"
+    ignored_result_keys = {"shape", "type", "meaning", "example", "input", "output"}
+    result_keys = [key for key in list(output_schema.keys()) if key.lower() not in ignored_result_keys] or ["generic_score", "verdict", "summary"]
     what_you_need = [field.description for field in input_fields[:6]] or ["Review the model description and provide the required inputs."]
-    result_keys = list(output_schema.keys()) or ["generic_score", "verdict", "summary"]
     what_result_means = [f"{_humanize_key(key)} is part of the model output." for key in result_keys[:4]]
     next_steps = [
         "Fill the inferred input fields from the model description.",
         "Use sample values first if you need to understand the expected format.",
         "Review the output keys to see how this model reports its result.",
     ]
-
-    model_name = str(payload.get("name") or "custom-hub-model")
-    author = str(payload.get("authorUsername") or "unknown")
-    detected_task_type = str(payload.get("taskName") or "Hub Model")
-    input_key, input_shape = _extract_inline_input_shape(description)
-    if not sample_input and input_shape == "[1, 1]" and input_fields:
-        input_shape = f"[1, {len(input_fields)}]"
     if sample_input and output_schema and input_fields:
         schema_confidence: Literal["high", "medium", "low"] = "high"
-    elif sample_input or input_fields or output_schema:
+    elif sample_input or input_fields or output_schema or feature_descriptions:
         schema_confidence = "medium"
     else:
         schema_confidence = "low"

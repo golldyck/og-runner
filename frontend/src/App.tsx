@@ -1771,7 +1771,7 @@ function buildManualInputs(model: ModelDefinition | null, values: Record<string,
     return {}
   }
 
-  const normalized: Record<string, string | number | boolean> = {}
+  const normalized: Record<string, string | number | boolean | unknown[] | Record<string, unknown>> = {}
   model.input_fields.forEach((field) => {
     const rawValue = values[field.key]
     if (rawValue === undefined || rawValue === null || rawValue === '') {
@@ -1791,7 +1791,17 @@ function buildManualInputs(model: ModelDefinition | null, values: Record<string,
       return
     }
 
-    normalized[field.key] = String(rawValue)
+    const stringValue = String(rawValue).trim()
+    if (stringValue.startsWith('[') || stringValue.startsWith('{')) {
+      try {
+        normalized[field.key] = JSON.parse(stringValue) as unknown[] | Record<string, unknown>
+        return
+      } catch {
+        // Keep the raw string if the model field is freeform text that only looks like JSON.
+      }
+    }
+
+    normalized[field.key] = stringValue
   })
   return normalized
 }
