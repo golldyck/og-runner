@@ -41,6 +41,8 @@ class ExecutionResult:
 
 _LLM_COOLDOWN_SECONDS = 300
 _llm_cooldown_until = 0.0
+_MARKET_CACHE_TTL_SECONDS = 300
+_market_cache: dict[str, tuple[float, Any]] = {}
 
 
 def _number_field(key: str, label: str, description: str, placeholder: str) -> InputField:
@@ -1013,6 +1015,42 @@ def fetch_protocol_preview(url: str) -> dict[str, Any]:
     }
 
 
+def build_market_context(
+    model: ModelDefinition,
+    target_url: str | None = None,
+    normalized_input: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    values = normalized_input or {}
+    outcome = result or {}
+    items: list[dict[str, str | None]] = []
+    notes: list[str] = []
+
+    if model.slug == "cross-chain-bridge-risk-classifier":
+        bridge_context = _build_bridge_market_context(target_url, values)
+        items.extend(bridge_context["items"])
+        notes.extend(bridge_context["notes"])
+    elif model.slug in {"defi-protocol-health-score", "dex-liquidity-exit-risk-scorer"}:
+        protocol_context = _build_llama_protocol_context(target_url, values)
+        items.extend(protocol_context["items"])
+        notes.extend(protocol_context["notes"])
+    elif model.slug == "stablecoin-depeg-risk-monitor":
+        stablecoin_context = _build_stablecoin_market_context(target_url, values, outcome)
+        items.extend(stablecoin_context["items"])
+        notes.extend(stablecoin_context["notes"])
+    elif model.slug == "governance-capture-risk-scorer":
+        governance_context = _build_governance_market_context(target_url, outcome)
+        items.extend(governance_context["items"])
+        notes.extend(governance_context["notes"])
+    elif model.slug == "nft-wash-trading-detector":
+        nft_context = _build_nft_market_context(target_url, outcome)
+        items.extend(nft_context["items"])
+        notes.extend(nft_context["notes"])
+
+    unique_notes = [note for note in dict.fromkeys(note for note in notes if note)]
+    return {"items": items[:6], "notes": unique_notes[:3]}
+
+
 def build_protocol_proxy_html(url: str) -> str:
     normalized = _normalize_protocol_url(url)
 
@@ -1034,6 +1072,433 @@ def build_protocol_proxy_html(url: str) -> str:
 
     proxied = _prepare_proxied_html(normalized, html)
     return proxied or _protocol_error_html(normalized, "Protocol preview returned an empty document.")
+
+
+def _cache_get(key: str, ttl_seconds: int = _MARKET_CACHE_TTL_SECONDS) -> Any | None:
+    cached = _market_cache.get(key)
+    if not cached:
+        return None
+    timestamp, value = cached
+    if monotonic() - timestamp > ttl_seconds:
+        _market_cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(key: str, value: Any) -> Any:
+    _market_cache[key] = (monotonic(), value)
+    return value
+
+
+def _fetch_json(url: str, *, params: dict[str, Any] | None = None, timeout: int = 6, cache_key: str | None = None) -> Any | None:
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            headers={"User-Agent": "OG-Runner/0.1"},
+        )
+        if not response.ok:
+            return None
+        payload = response.json()
+        if cache_key:
+            return _cache_set(cache_key, payload)
+        return payload
+    except Exception:
+        return None
+
+
+def _format_usd(value: Any) -> str:
+    try:
+        amount = float(value)
+    except Exception:
+        return "-"
+    absolute = abs(amount)
+    if absolute >= 1_000_000_000:
+        return f"${amount / 1_000_000_000:.2f}B"
+    if absolute >= 1_000_000:
+        return f"${amount / 1_000_000:.2f}M"
+    if absolute >= 1_000:
+        return f"${amount / 1_000:.1f}K"
+    return f"${amount:,.2f}"
+
+
+def _format_number(value: Any) -> str:
+    try:
+        amount = float(value)
+    except Exception:
+        return "-"
+    if amount >= 1_000_000:
+        return f"{amount / 1_000_000:.2f}M"
+    if amount >= 1_000:
+        return f"{amount / 1_000:.1f}K"
+    return f"{amount:,.0f}"
+
+
+def _format_percent(value: Any, scale: float = 1.0) -> str:
+    try:
+        amount = float(value) * scale
+    except Exception:
+        return "-"
+    return f"{amount:.2f}%"
+
+
+def _extract_target_host(target_url: str | None) -> str:
+    if not target_url:
+        return ""
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", target_url.strip()):
+        return ""
+    return getHostLabel(target_url)
+
+
+def _guess_protocol_aliases(target_url: str | None) -> list[str]:
+    host = _extract_target_host(target_url)
+    if not host:
+        return []
+    parts = [part for part in re.split(r"[^a-z0-9]+", host.lower()) if part and part not in {"www", "app", "finance", "io", "com"}]
+    aliases = [" ".join(parts).strip(), "".join(parts).strip(), parts[0] if parts else ""]
+    return [alias for alias in dict.fromkeys(alias for alias in aliases if alias)]
+
+
+def _fetch_llama_protocols() -> list[dict[str, Any]]:
+    payload = _fetch_json("https://api.llama.fi/protocols", timeout=8, cache_key="llama_protocols")
+    return payload if isinstance(payload, list) else []
+
+
+def _fetch_llama_protocol_detail(slug: str) -> dict[str, Any] | None:
+    if not slug:
+        return None
+    payload = _fetch_json(f"https://api.llama.fi/protocol/{quote(slug)}", timeout=8, cache_key=f"llama_protocol:{slug}")
+    return payload if isinstance(payload, dict) else None
+
+
+def _fetch_coingecko_market(coin_id: str) -> dict[str, Any] | None:
+    payload = _fetch_json(
+        "https://api.coingecko.com/api/v3/coins/markets",
+        params={
+            "vs_currency": "usd",
+            "ids": coin_id,
+            "price_change_percentage": "24h",
+        },
+        timeout=8,
+        cache_key=f"coingecko_market:{coin_id}",
+    )
+    if isinstance(payload, list) and payload:
+        return payload[0]
+    return None
+
+
+def _fetch_coingecko_search_market(query: str) -> dict[str, Any] | None:
+    normalized = query.strip().lower()
+    if not normalized:
+        return None
+    search_payload = _fetch_json(
+        "https://api.coingecko.com/api/v3/search",
+        params={"query": normalized},
+        timeout=8,
+        cache_key=f"coingecko_search:{normalized}",
+    )
+    if not isinstance(search_payload, dict):
+        return None
+    coins = search_payload.get("coins") or []
+    if not coins:
+        return None
+    best = coins[0]
+    coin_id = best.get("id")
+    if not coin_id:
+        return None
+    return _fetch_coingecko_market(str(coin_id))
+
+
+def _fetch_coingecko_contract_market(address: str) -> dict[str, Any] | None:
+    normalized = address.strip()
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", normalized):
+        return None
+    for platform in (
+        "ethereum",
+        "base",
+        "arbitrum-one",
+        "polygon-pos",
+        "optimistic-ethereum",
+        "avalanche",
+    ):
+        payload = _fetch_json(
+            f"https://api.coingecko.com/api/v3/coins/{platform}/contract/{normalized}",
+            timeout=8,
+            cache_key=f"coingecko_contract:{platform}:{normalized.lower()}",
+        )
+        if not isinstance(payload, dict):
+            continue
+        market_data = payload.get("market_data") or {}
+        current_price = market_data.get("current_price") or {}
+        market_cap = market_data.get("market_cap") or {}
+        volume = market_data.get("total_volume") or {}
+        return {
+            "name": payload.get("name"),
+            "symbol": payload.get("symbol"),
+            "current_price": current_price.get("usd"),
+            "market_cap": market_cap.get("usd"),
+            "total_volume": volume.get("usd"),
+            "price_change_percentage_24h": market_data.get("price_change_percentage_24h"),
+            "source": "CoinGecko",
+        }
+    return None
+
+
+def _build_bridge_market_context(target_url: str | None, values: dict[str, Any]) -> dict[str, Any]:
+    items = [
+        {"label": "TVL", "value": _format_usd(values.get("tvl_usd")), "detail": "Model input snapshot", "source": "Model"},
+        {"label": "Daily volume", "value": _format_number(values.get("daily_tx_volume")), "detail": "Transfers per day", "source": "Model"},
+        {"label": "Chains", "value": _format_number(values.get("chains_supported")), "detail": "Connected networks", "source": "Model"},
+        {"label": "Incidents", "value": _format_number(values.get("prior_incidents")), "detail": "Known prior incidents", "source": "Model"},
+    ]
+    notes: list[str] = []
+    protocol = _fetch_llama_protocol(target_url or "", _guess_protocol_aliases(target_url))
+    if protocol:
+        items[0] = {
+            "label": "TVL",
+            "value": _format_usd(protocol.get("tvl")),
+            "detail": str(protocol.get("name") or "Live protocol snapshot"),
+            "source": "DeFiLlama",
+        }
+        items.append(
+            {
+                "label": "Category",
+                "value": str(protocol.get("category") or "Protocol"),
+                "detail": _extract_target_host(target_url) or None,
+                "source": "DeFiLlama",
+            }
+        )
+        if protocol.get("mcap") is not None:
+            items.append(
+                {
+                    "label": "MCap",
+                    "value": _format_usd(protocol.get("mcap")),
+                    "detail": "Protocol token market cap",
+                    "source": "DeFiLlama",
+                }
+            )
+        if protocol.get("change_1d") is not None:
+            items.append(
+                {
+                    "label": "TVL 24h",
+                    "value": _format_percent(protocol.get("change_1d")),
+                    "detail": "One-day TVL change",
+                    "source": "DeFiLlama",
+                }
+            )
+        notes.append(f"Live protocol context loaded from DeFiLlama for {protocol.get('name', 'this bridge')}.")
+    else:
+        notes.append("Live protocol context was unavailable, so the market cards are using model-level bridge inputs.")
+    return {"items": items[:6], "notes": notes}
+
+
+def _build_llama_protocol_context(target_url: str | None, values: dict[str, Any]) -> dict[str, Any]:
+    protocol = _fetch_llama_protocol(target_url or "", _guess_protocol_aliases(target_url))
+    items: list[dict[str, str | None]] = []
+    notes: list[str] = []
+    if protocol:
+        items.append(
+            {
+                "label": "TVL",
+                "value": _format_usd(protocol.get("tvl")),
+                "detail": str(protocol.get("name") or "Protocol TVL"),
+                "source": "DeFiLlama",
+            }
+        )
+        if protocol.get("category") is not None:
+            items.append(
+                {
+                    "label": "Category",
+                    "value": str(protocol.get("category")),
+                    "detail": _extract_target_host(target_url) or None,
+                    "source": "DeFiLlama",
+                }
+            )
+        if protocol.get("chains"):
+            chain_count = len(protocol.get("chains") or [])
+            items.append(
+                {
+                    "label": "Chains",
+                    "value": str(chain_count),
+                    "detail": "Networks covered",
+                    "source": "DeFiLlama",
+                }
+            )
+        if protocol.get("mcap") is not None:
+            items.append(
+                {
+                    "label": "MCap",
+                    "value": _format_usd(protocol.get("mcap")),
+                    "detail": "Token market cap",
+                    "source": "DeFiLlama",
+                }
+            )
+        if protocol.get("change_1d") is not None:
+            items.append(
+                {
+                    "label": "TVL 24h",
+                    "value": _format_percent(protocol.get("change_1d")),
+                    "detail": "One-day TVL change",
+                    "source": "DeFiLlama",
+                }
+            )
+        if protocol.get("change_7d") is not None:
+            items.append(
+                {
+                    "label": "TVL 7d",
+                    "value": _format_percent(protocol.get("change_7d")),
+                    "detail": "Seven-day TVL change",
+                    "source": "DeFiLlama",
+                }
+            )
+        notes.append(f"Live protocol context loaded from DeFiLlama for {protocol.get('name', 'this protocol')}.")
+    else:
+        fallback_tvl = values.get("tvl_usd") or values.get("pool_tvl_usd")
+        if fallback_tvl is not None:
+            items.append(
+                {
+                    "label": "TVL",
+                    "value": _format_usd(fallback_tvl),
+                    "detail": "Model input snapshot",
+                    "source": "Model",
+                }
+            )
+        notes.append("Live protocol context was unavailable, so the market cards are using model-level inputs only.")
+    return {"items": items[:6], "notes": notes}
+
+
+def _build_stablecoin_market_context(target_url: str | None, values: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    target = (target_url or "").strip()
+    market = _fetch_coingecko_contract_market(target)
+    if market is None:
+        for alias, coin_id in {
+            "usdc": "usd-coin",
+            "usdt": "tether",
+            "dai": "dai",
+            "frax": "frax",
+            "usde": "ethena-usde",
+        }.items():
+            if alias in target.lower():
+                market = _fetch_coingecko_market(coin_id)
+                break
+    if market is None and target:
+        market = _fetch_coingecko_search_market(target)
+
+    items: list[dict[str, str | None]] = [
+        {
+            "label": "Peg deviation",
+            "value": _format_percent(values.get("peg_deviation_pct"), 100),
+            "detail": str(result.get("alert") or "Stablecoin stress"),
+            "source": "Model",
+        }
+    ]
+    notes: list[str] = []
+    if market:
+        items.extend(
+            [
+                {
+                    "label": "Spot price",
+                    "value": _format_usd(market.get("current_price")),
+                    "detail": str(market.get("symbol") or market.get("name") or "CoinGecko market"),
+                    "source": "CoinGecko",
+                },
+                {
+                    "label": "Market cap",
+                    "value": _format_usd(market.get("market_cap")),
+                    "detail": "Current market capitalization",
+                    "source": "CoinGecko",
+                },
+                {
+                    "label": "24h volume",
+                    "value": _format_usd(market.get("total_volume")),
+                    "detail": "Spot trading volume",
+                    "source": "CoinGecko",
+                },
+                {
+                    "label": "24h move",
+                    "value": _format_percent(market.get("price_change_percentage_24h")),
+                    "detail": "Price move over 24h",
+                    "source": "CoinGecko",
+                },
+            ]
+        )
+        notes.append("Live stablecoin market data loaded from CoinGecko.")
+    else:
+        notes.append("Live stablecoin market data was unavailable, so the runner is showing model-derived peg context only.")
+    return {"items": items[:6], "notes": notes}
+
+
+def _build_governance_market_context(target_url: str | None, result: dict[str, Any]) -> dict[str, Any]:
+    host = _extract_target_host(target_url)
+    coin_id = None
+    for alias, candidate in {
+        "aave": "aave",
+        "compound": "compound-governance-token",
+        "maker": "maker",
+        "sky": "maker",
+        "uniswap": "uniswap",
+    }.items():
+        if alias in host:
+            coin_id = candidate
+            break
+    if coin_id is None:
+        return {"items": [], "notes": []}
+    market = _fetch_coingecko_market(coin_id)
+    if market is None:
+        return {"items": [], "notes": ["Governance token market data was unavailable for this protocol."]}
+    return {
+        "items": [
+            {
+                "label": "Token price",
+                "value": _format_usd(market.get("current_price")),
+                "detail": str(market.get("symbol") or market.get("name") or "Governance token"),
+                "source": "CoinGecko",
+            },
+            {
+                "label": "Market cap",
+                "value": _format_usd(market.get("market_cap")),
+                "detail": f"Grade {result.get('grade', '-')}",
+                "source": "CoinGecko",
+            },
+            {
+                "label": "24h move",
+                "value": _format_percent(market.get("price_change_percentage_24h")),
+                "detail": "Governance token price change",
+                "source": "CoinGecko",
+            },
+        ],
+        "notes": ["Live governance token context loaded from CoinGecko."],
+    }
+
+
+def _build_nft_market_context(target_url: str | None, result: dict[str, Any]) -> dict[str, Any]:
+    target = (target_url or "").strip()
+    if not target:
+        return {"items": [], "notes": []}
+    items = [
+        {
+            "label": "Source",
+            "value": _extract_target_host(target) or "NFT target",
+            "detail": str(result.get("verdict") or "Wash-trading scan"),
+            "source": "Runner",
+        }
+    ]
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", target):
+        items.append(
+            {
+                "label": "Contract",
+                "value": f"{target[:6]}...{target[-4:]}",
+                "detail": "Collection contract",
+                "source": "Runner",
+            }
+        )
+    notes = ["NFT market feed integration can be extended with collection floor and volume APIs next."]
+    return {"items": items, "notes": notes}
 
 
 def _get_alpha_client():
@@ -2056,28 +2521,22 @@ def infer_inputs_from_url(model: ModelDefinition, target_url: str | None) -> tup
 
 def _fetch_coingecko_simple_price(coin_id: str) -> dict[str, Any] | None:
     """Fetch a small live price snapshot for a known coin id."""
-    try:
-        response = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": coin_id,
-                "vs_currencies": "usd",
-                "include_market_cap": "true",
-                "include_24hr_vol": "true",
-                "include_24hr_change": "true",
-                "include_last_updated_at": "true",
-            },
-            timeout=4,
-            headers={"User-Agent": "OG-Runner/0.1"},
-        )
-        if not response.ok:
-            return None
-        payload = response.json()
-        if coin_id not in payload:
-            return None
-        return payload[coin_id]
-    except Exception:
+    payload = _fetch_json(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={
+            "ids": coin_id,
+            "vs_currencies": "usd",
+            "include_market_cap": "true",
+            "include_24hr_vol": "true",
+            "include_24hr_change": "true",
+            "include_last_updated_at": "true",
+        },
+        timeout=4,
+        cache_key=f"coingecko_simple:{coin_id}",
+    )
+    if not isinstance(payload, dict) or coin_id not in payload:
         return None
+    return payload[coin_id]
 
 
 def getHostLabel(url: str) -> str:
@@ -2091,14 +2550,9 @@ def getHostLabel(url: str) -> str:
 def _fetch_llama_protocol(query: str, aliases: list[str] | None = None) -> dict[str, Any] | None:
     """Fetch a matching DeFiLlama protocol entry for live bridge or protocol hints."""
     try:
-        response = requests.get(
-            "https://api.llama.fi/protocols",
-            timeout=6,
-            headers={"User-Agent": "OG-Runner/0.1"},
-        )
-        if not response.ok:
+        protocols = _fetch_llama_protocols()
+        if not protocols:
             return None
-        protocols = response.json()
         lowered = query.lower()
         query_host = urlparse(query if query.startswith("http") else f"https://{query}").netloc.lower()
 

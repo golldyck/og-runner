@@ -147,3 +147,22 @@ class ProtocolPreviewResponse(BaseModel):
     site_name: str | None = None
     embed_allowed: bool
     status_code: int | None = None
+
+
+class MarketContextRequest(BaseModel):
+    model_ref: str
+    target_url: str | None = None
+    normalized_input: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketContextItem(BaseModel):
+    label: str
+    value: str
+    detail: str | None = None
+    source: str | None = None
+
+
+class MarketContextResponse(BaseModel):
+    items: list[MarketContextItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)

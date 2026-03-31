@@ -112,6 +112,18 @@ type ProtocolPreviewResponse = {
   status_code: number | null
 }
 
+type MarketContextItem = {
+  label: string
+  value: string
+  detail: string | null
+  source: string | null
+}
+
+type MarketContextResponse = {
+  items: MarketContextItem[]
+  notes: string[]
+}
+
 type BridgeSortKey = 'risk_score' | 'tvl_usd' | 'prior_incidents'
 type LeaderboardFilter = 'all' | 'governance' | 'bridge' | 'stablecoin' | 'dex' | 'nft' | 'health'
 type ViewTab = 'runner' | 'protocol' | 'leaderboard'
@@ -248,6 +260,7 @@ function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [walletPreflight, setWalletPreflight] = useState<WalletPreflightResponse | null>(null)
   const [protocolPreview, setProtocolPreview] = useState<ProtocolPreviewResponse | null>(null)
+  const [marketContext, setMarketContext] = useState<MarketContextResponse | null>(null)
   const [protocolPreviewLoading, setProtocolPreviewLoading] = useState(false)
   const [debouncedTargetUrl, setDebouncedTargetUrl] = useState(defaultTargetUrl)
   const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({})
@@ -402,6 +415,7 @@ function App() {
       setError(null)
     }
     setRunResult(null)
+    setMarketContext(null)
 
     try {
       const response = await fetch(apiUrl('/api/models/resolve'), {
@@ -482,6 +496,29 @@ function App() {
     }
   }
 
+  async function loadMarketContext(nextModel: ModelDefinition, nextResult: RunResponse) {
+    try {
+      const response = await fetch(apiUrl('/api/market/context'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_ref: nextModel.hub_url,
+          target_url: targetUrl.trim() ? normalizePreviewUrl(nextModel, targetUrl) : undefined,
+          normalized_input: nextResult.normalized_input,
+          result: nextResult.result,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Market context failed to load.')
+      }
+
+      setMarketContext((await response.json()) as MarketContextResponse)
+    } catch {
+      setMarketContext(null)
+    }
+  }
+
   async function runModel() {
     setHasUserInteracted(true)
     setActiveTab('runner')
@@ -503,6 +540,7 @@ function App() {
     setRunning(true)
     setError(null)
     setRunResult(null)
+    setMarketContext(null)
 
     try {
       const response = await fetch(apiUrl('/api/models/run'), {
@@ -523,6 +561,7 @@ function App() {
 
       const payload = (await response.json()) as RunResponse
       setRunResult(payload)
+      await loadMarketContext(model, payload)
       await loadGlobalLeaderboard()
       await loadBackendStatus()
       setLeaderboardFresh(true)
@@ -813,7 +852,13 @@ function App() {
                       <StatusSummary health={health} walletPreflight={walletPreflight} />
                     </div>
 
-                    <RunnerPreviewPanel model={model} runResult={runResult} targetUrl={debouncedTargetUrl} protocolPreview={protocolPreview} />
+                    <RunnerPreviewPanel
+                      model={model}
+                      runResult={runResult}
+                      targetUrl={debouncedTargetUrl}
+                      protocolPreview={protocolPreview}
+                      marketContext={marketContext}
+                    />
                   </div>
                 ) : null}
 
@@ -913,14 +958,51 @@ function SiteBackdrop({
 function StatCard({
   label,
   value,
+  note,
 }: {
   label: string
   value: string
+  note?: string | null
 }) {
   return (
     <div className="stat-card">
       <p className="panel-kicker">{label}</p>
       <p className="stat-value">{value}</p>
+      {note ? <p className="stat-note">{note}</p> : null}
+    </div>
+  )
+}
+
+function MarketContextPanel({
+  marketContext,
+}: {
+  marketContext: MarketContextResponse | null
+}) {
+  if (!marketContext || (marketContext.items.length === 0 && marketContext.notes.length === 0)) {
+    return null
+  }
+
+  return (
+    <div className="market-context-shell">
+      <p className="panel-kicker">Market context</p>
+
+      {marketContext.items.length > 0 ? (
+        <div className="detail-grid market-context-grid">
+          {marketContext.items.map((item) => (
+            <StatCard key={`${item.label}-${item.value}`} label={item.label} value={item.value} note={item.detail ?? item.source} />
+          ))}
+        </div>
+      ) : null}
+
+      {marketContext.notes.length > 0 ? (
+        <div className="market-context-notes">
+          {marketContext.notes.map((note) => (
+            <p key={note} className="market-context-note">
+              {note}
+            </p>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1118,11 +1200,13 @@ function RunnerPreviewPanel({
   runResult,
   targetUrl,
   protocolPreview,
+  marketContext,
 }: {
   model: ModelDefinition | null
   runResult: RunResponse | null
   targetUrl: string
   protocolPreview: ProtocolPreviewResponse | null
+  marketContext: MarketContextResponse | null
 }) {
   const targetLabel = getTargetDisplayValue(model, targetUrl)
   const sourceLabel = getResultSourceLabel(model)
@@ -1173,6 +1257,7 @@ function RunnerPreviewPanel({
                   <p className="panel-kicker">Model parameters</p>
                   <ParameterScaleList model={model} result={runResult.result} />
                 </div>
+                <MarketContextPanel marketContext={marketContext} />
                 <div className="detail-grid">
                   {getScoreDetails(model, runResult.result).map(([key, value]) => (
                     <StatCard key={key} label={key} value={value} />

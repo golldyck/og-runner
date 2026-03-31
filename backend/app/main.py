@@ -15,6 +15,8 @@ from app.schemas import (
     AssistantResponse,
     BridgeLeaderboardResponse,
     GlobalLeaderboardResponse,
+    MarketContextRequest,
+    MarketContextResponse,
     ModelListResponse,
     ModelSearchResponse,
     ModelResolveRequest,
@@ -27,6 +29,7 @@ from app.schemas import (
 from app.services.og_runner import (
     build_bridge_leaderboard,
     build_global_leaderboard,
+    build_market_context,
     build_model_usage,
     build_protocol_proxy_html,
     fetch_protocol_preview,
@@ -170,6 +173,23 @@ async def protocol_render_endpoint(url: str = "") -> HTMLResponse:
     if not url.strip():
         raise HTTPException(status_code=400, detail="Protocol URL is required.")
     return HTMLResponse(content=build_protocol_proxy_html(url))
+
+
+@app.post("/api/market/context", response_model=MarketContextResponse)
+async def market_context_endpoint(payload: MarketContextRequest) -> MarketContextResponse:
+    """Return live market and protocol context to enrich the current model result."""
+    try:
+        model = resolve_model(payload.model_ref)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    context = build_market_context(
+        model=model,
+        target_url=payload.target_url,
+        normalized_input=payload.normalized_input,
+        result=payload.result,
+    )
+    return MarketContextResponse(**context)
 
 
 @app.get("/api/leaderboards/bridges", response_model=BridgeLeaderboardResponse)

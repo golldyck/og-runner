@@ -1000,10 +1000,43 @@ input {
   font-size: 0.8rem;
 }
 
+.stat-note {
+  margin: 0.28rem 0 0;
+  color: var(--og-copy-faint);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
 .parameter-scale-list {
   display: grid;
   gap: 0.55rem;
   margin-top: 0.75rem;
+}
+
+.market-context-shell {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.market-context-grid {
+  margin-top: 0;
+}
+
+.market-context-notes {
+  display: grid;
+  gap: 0.38rem;
+}
+
+.market-context-note {
+  margin: 0;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(206, 229, 249, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.52rem 0.62rem;
+  color: var(--og-copy-soft);
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 
 .signal-shell {
