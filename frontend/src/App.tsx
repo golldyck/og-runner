@@ -768,7 +768,12 @@ function App() {
 
                           {model.input_fields.map((field) => (
                             <label key={field.key} className="field-shell">
-                              <span className="field-label">{field.label}</span>
+                              <span className="field-label">
+                                {field.label}
+                                {isMatrixField(model, field) ? (
+                                  <span className="field-shape-tag">{getMatrixFieldHint(model, field)}</span>
+                                ) : null}
+                              </span>
                               {field.kind === 'boolean' ? (
                                 <button
                                   className={`choice-chip ${inputValues[field.key] ? 'choice-chip-active' : ''}`}
@@ -782,6 +787,19 @@ function App() {
                                 >
                                   {inputValues[field.key] ? 'True' : 'False'}
                                 </button>
+                              ) : isMatrixField(model, field) ? (
+                                <textarea
+                                  className="screen-input screen-textarea"
+                                  value={String(inputValues[field.key] ?? '')}
+                                  onChange={(event) =>
+                                    setInputValues((current) => ({
+                                      ...current,
+                                      [field.key]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={field.placeholder ?? field.description}
+                                  spellCheck={false}
+                                />
                               ) : (
                                 <input
                                   className="screen-input"
@@ -1761,7 +1779,15 @@ function isCustomHubModel(model: ModelDefinition) {
 function buildSampleInputValues(model: ModelDefinition) {
   const values: Record<string, string | boolean> = {}
   Object.entries(model.sample_input ?? {}).forEach(([key, value]) => {
-    values[key] = typeof value === 'boolean' ? value : String(value)
+    if (typeof value === 'boolean') {
+      values[key] = value
+      return
+    }
+    if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+      values[key] = JSON.stringify(value, null, 2)
+      return
+    }
+    values[key] = String(value)
   })
   return values
 }
@@ -1804,6 +1830,24 @@ function buildManualInputs(model: ModelDefinition | null, values: Record<string,
     normalized[field.key] = stringValue
   })
   return normalized
+}
+
+function isMatrixField(model: ModelDefinition, field: InputField) {
+  const sampleValue = model.sample_input?.[field.key]
+  return (
+    field.kind === 'text'
+    && Array.isArray(sampleValue)
+    && sampleValue.length > 0
+    && Array.isArray(sampleValue[0])
+  )
+}
+
+function getMatrixFieldHint(model: ModelDefinition, field: InputField) {
+  const sampleValue = model.sample_input?.[field.key]
+  if (!Array.isArray(sampleValue) || sampleValue.length === 0 || !Array.isArray(sampleValue[0])) {
+    return null
+  }
+  return `${sampleValue.length} x ${sampleValue[0].length}`
 }
 
 function _humanizeLabel(value: string) {

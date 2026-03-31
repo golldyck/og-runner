@@ -403,6 +403,22 @@ input {
   color: var(--og-kicker);
 }
 
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.field-shape-tag {
+  border-radius: 999px;
+  border: 1px solid rgba(206, 229, 249, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.1rem 0.38rem;
+  color: var(--og-copy-soft);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+}
+
 .screen-input {
   width: 100%;
   border-radius: 0.9rem;
@@ -424,6 +440,15 @@ input {
   border-color: rgba(36, 188, 227, 0.32);
   box-shadow: 0 0 0 3px rgba(36, 188, 227, 0.08);
   transform: translateY(-1px);
+}
+
+.screen-textarea {
+  min-height: 8.5rem;
+  max-height: 13.5rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.4;
+  white-space: pre;
 }
 
 .picker-trigger {
