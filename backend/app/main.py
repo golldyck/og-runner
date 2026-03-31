@@ -106,6 +106,10 @@ def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
                 execution.warnings.append(
                     "Live OpenGradient inference is currently disabled in backend settings. Using local fallback."
                 )
+            elif settings.og_private_key and settings.og_enable_live_inference:
+                execution.warnings.append(
+                    "OpenGradient SDK is unavailable in the backend runtime. Using local fallback."
+                )
             else:
                 execution.warnings.append("Set OG_PRIVATE_KEY in backend .env to enable live OpenGradient inference.")
     return execution

@@ -1073,17 +1073,23 @@ def fetch_protocol_preview(url: str) -> dict[str, Any]:
     except Exception:
         return {
             "url": normalized,
+            "source_url": normalized,
+            "domain": host or None,
             "host": host,
             "title": None,
             "description": None,
             "image_url": None,
             "site_name": None,
             "embed_allowed": False,
+            "embed_status": "unknown",
             "status_code": None,
         }
 
+    embed_allowed = _is_embed_allowed(headers)
     return {
         "url": normalized,
+        "source_url": str(response.url or normalized),
+        "domain": host or None,
         "host": host,
         "title": _extract_html_title(html),
         "description": _extract_meta_content(html, "description")
@@ -1094,7 +1100,8 @@ def fetch_protocol_preview(url: str) -> dict[str, Any]:
             _extract_meta_content(html, "og:image") or _extract_meta_content(html, "twitter:image"),
         ),
         "site_name": _extract_meta_content(html, "og:site_name"),
-        "embed_allowed": _is_embed_allowed(headers),
+        "embed_allowed": embed_allowed,
+        "embed_status": "allowed" if embed_allowed else "blocked",
         "status_code": response.status_code,
     }
 
