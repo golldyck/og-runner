@@ -2605,6 +2605,8 @@ def run_demo(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
     if explanation_source == "local_fallback":
         if settings.og_private_key and not settings.og_enable_live_llm:
             warnings.append("OpenGradient LLM explanations are currently disabled in backend settings. Using local fallback.")
+        elif settings.og_private_key and settings.og_enable_live_llm:
+            warnings.append("OpenGradient LLM explanation request failed, so a local fallback explanation was used.")
         else:
             warnings.append("OpenGradient LLM assistant is not configured; local explanation fallback used.")
 
@@ -2645,6 +2647,8 @@ def run_live(model: ModelDefinition, inputs: dict[str, Any]) -> ExecutionResult:
     if explanation_source == "local_fallback":
         if settings.og_private_key and not settings.og_enable_live_llm:
             warnings.append("OpenGradient LLM explanations are currently disabled in backend settings. Using local fallback.")
+        elif settings.og_private_key and settings.og_enable_live_llm:
+            warnings.append("OpenGradient LLM explanation request failed, so a local fallback explanation was used.")
         else:
             warnings.append("OpenGradient LLM assistant is not configured; local explanation fallback used.")
 
