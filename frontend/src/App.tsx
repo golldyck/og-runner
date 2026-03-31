@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import ogRunnerLogo from './assets/og-runner-logo.svg'
 
 type InputField = {
   key: string
@@ -613,7 +614,10 @@ function App() {
 
               <div className="screen-content">
                 <div className="screen-header">
-                  <span className="screen-badge">OG Runner</span>
+                  <span className="screen-badge screen-badge-brand">
+                    <img className="screen-badge-logo" src={ogRunnerLogo} alt="OG Runner" />
+                    <span>OG Runner</span>
+                  </span>
                   <span className="screen-meta">{model?.category ?? 'Model not loaded'}</span>
                 </div>
 
@@ -656,7 +660,7 @@ function App() {
                 </div>
 
                 {activeTab === 'runner' ? (
-                  <div className="screen-layout">
+                  <div className="screen-layout panel-transition">
                     <div className="screen-form">
                       <label className="field-shell">
                         <span className="field-label">Model</span>
@@ -1066,6 +1070,7 @@ function App() {
                     <RunnerPreviewPanel
                       model={model}
                       runResult={runResult}
+                      running={running}
                       targetUrl={debouncedTargetUrl}
                       protocolPreview={protocolPreview}
                       marketContext={marketContext}
@@ -1074,21 +1079,25 @@ function App() {
                 ) : null}
 
                 {activeTab === 'protocol' && hasProtocolUrl ? (
-                  <ProtocolViewport key={`${model?.slug ?? 'unknown'}-${debouncedTargetUrl}`} model={model} url={debouncedTargetUrl} preview={protocolPreview} loading={protocolPreviewLoading} />
+                  <div className="panel-transition">
+                    <ProtocolViewport key={`${model?.slug ?? 'unknown'}-${debouncedTargetUrl}`} model={model} url={debouncedTargetUrl} preview={protocolPreview} loading={protocolPreviewLoading} />
+                  </div>
                 ) : null}
 
                 {activeTab === 'leaderboard' ? (
-                  <LeaderboardTab
-                    entries={globalLeaderboard}
-                    modelUsage={modelUsage}
-                    bridgeEntries={bridgeLeaderboard}
-                    currentRun={runResult}
-                    filter={leaderboardFilter}
-                    sortKey={bridgeSort}
-                    onFilterChange={setLeaderboardFilter}
-                    onSortChange={setBridgeSort}
-                    showBridgeBoard={model?.slug === 'cross-chain-bridge-risk-classifier' && bridgeLeaderboard.length > 0}
-                  />
+                  <div className="panel-transition">
+                    <LeaderboardTab
+                      entries={globalLeaderboard}
+                      modelUsage={modelUsage}
+                      bridgeEntries={bridgeLeaderboard}
+                      currentRun={runResult}
+                      filter={leaderboardFilter}
+                      sortKey={bridgeSort}
+                      onFilterChange={setLeaderboardFilter}
+                      onSortChange={setBridgeSort}
+                      showBridgeBoard={model?.slug === 'cross-chain-bridge-risk-classifier' && bridgeLeaderboard.length > 0}
+                    />
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -1409,12 +1418,14 @@ function GlobalLeaderboardPanel({
 function RunnerPreviewPanel({
   model,
   runResult,
+  running,
   targetUrl,
   protocolPreview,
   marketContext,
 }: {
   model: ModelDefinition | null
   runResult: RunResponse | null
+  running: boolean
   targetUrl: string
   protocolPreview: ProtocolPreviewResponse | null
   marketContext: MarketContextResponse | null
@@ -1428,7 +1439,20 @@ function RunnerPreviewPanel({
       <div className="preview-shade" />
 
       <div className="preview-content">
-        {runResult && model ? (
+        {running ? (
+          <div className="run-loading-state">
+            <p className="panel-kicker">Running model</p>
+            <p className="run-loading-title">Analyzing model input and scoring signals...</p>
+            <div className="run-loading-bar" role="status" aria-live="polite" aria-label="Model is running">
+              <span />
+            </div>
+            <div className="run-loading-grid">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        ) : runResult && model ? (
           <>
             <div className="result-hero">
               <div className="result-headline result-headline-compact">
