@@ -1929,6 +1929,9 @@ function summarizeWarnings(warnings: string[]) {
     if (normalized.includes('live opengradient inference is currently disabled')) {
       return 'Live OpenGradient inference is disabled right now, so the runner is using the fast local analysis path.'
     }
+    if (normalized.includes('base + opg stack')) {
+      return 'This deployment uses local model execution with live OpenGradient LLM support on the Base + OPG stack.'
+    }
     if (normalized.includes('llm') && normalized.includes('fallback')) {
       return 'The score explanation is currently using local fallback copy instead of the OpenGradient LLM.'
     }
@@ -1962,6 +1965,10 @@ function getLiveStatusCopy(
 
   if (!llmReady && llmError) {
     return `Explanation is currently degraded: ${llmError}`
+  }
+
+  if (!liveReady && llmReady && issues.length === 0) {
+    return 'This deployment is configured for local model execution plus OpenGradient LLM on the Base + OPG stack.'
   }
 
   if (issues.length > 0) {

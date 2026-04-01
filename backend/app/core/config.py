@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     og_private_key: str | None = None
     og_alpha_private_key: str | None = None
     og_llm_private_key: str | None = None
-    og_enable_live_inference: bool = True
+    og_enable_live_inference: bool = False
     og_enable_live_llm: bool = True
     og_live_strict: bool = False
     og_rpc_url: str = "https://ogevmdevnet.opengradient.ai"

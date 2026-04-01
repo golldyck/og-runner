@@ -49,7 +49,7 @@ _ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
 
 
 def _resolve_alpha_private_key() -> str | None:
-    return settings.og_alpha_private_key or settings.og_private_key
+    return settings.og_alpha_private_key
 
 
 def _resolve_llm_private_key() -> str | None:
@@ -3316,7 +3316,7 @@ def get_wallet_preflight() -> dict[str, Any]:
 
         alpha_owner = None
         alpha_balance = 0.0
-        if alpha_private_key:
+        if settings.og_enable_live_inference and alpha_private_key:
             alpha_owner = Web3.to_checksum_address(Web3().eth.account.from_key(alpha_private_key).address)
             alpha_w3 = Web3(Web3.HTTPProvider(_resolve_alpha_rpc_url()))
             alpha_balance = float(alpha_w3.eth.get_balance(alpha_owner)) / 10**18
@@ -3324,8 +3324,8 @@ def get_wallet_preflight() -> dict[str, Any]:
                 issues.append(
                     f"Alpha inference wallet has 0 ETH on chain {alpha_w3.eth.chain_id}. Fund the alpha testnet wallet to enable on-chain ML inference."
                 )
-        else:
-            issues.append("Alpha inference wallet is not configured.")
+        elif settings.og_enable_live_inference:
+            issues.append("Set OG_ALPHA_PRIVATE_KEY to enable on-chain ML inference on the alpha network.")
 
         return {
             "wallet_address": llm_owner or alpha_owner,
@@ -3333,7 +3333,7 @@ def get_wallet_preflight() -> dict[str, Any]:
             "opg_balance": opg_balance,
             "permit2_allowance": allowance,
             "llm_ready": bool(llm_owner and eth_balance > 0 and opg_balance > 0 and allowance >= 0.1),
-            "live_inference_ready": bool(alpha_owner and alpha_balance > 0),
+            "live_inference_ready": bool(settings.og_enable_live_inference and alpha_owner and alpha_balance > 0),
             "issues": issues,
         }
     except Exception as exc:
