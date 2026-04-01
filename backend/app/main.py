@@ -34,6 +34,7 @@ from app.services.og_runner import (
     build_protocol_proxy_html,
     fetch_protocol_preview,
     generate_assistant_answer,
+    get_last_llm_error,
     get_wallet_preflight,
     list_available_llm_models,
     list_models,
@@ -73,7 +74,11 @@ _last_live_inference_error = ""
 
 
 def _live_inference_available() -> bool:
-    return supports_live_inference() and monotonic() >= _live_inference_cooldown_until
+    return (
+        supports_live_inference()
+        and monotonic() >= _live_inference_cooldown_until
+        and not _last_live_inference_error
+    )
 
 
 def _live_inference_cooldown_active() -> bool:
@@ -95,11 +100,18 @@ def _mark_live_inference_failure(exc: Exception) -> None:
     _live_inference_cooldown_until = monotonic() + _LIVE_INFERENCE_COOLDOWN_SECONDS
 
 
+def _clear_live_inference_failure() -> None:
+    global _live_inference_cooldown_until, _last_live_inference_error
+    _live_inference_cooldown_until = 0.0
+    _last_live_inference_error = ""
+
+
 def _execute_model_run(model, payload: RunModelRequest, merged_inputs: dict):
     execution = None
     if payload.mode != "demo" and _live_inference_available():
         try:
             execution = run_live(model, merged_inputs)
+            _clear_live_inference_failure()
         except Exception as exc:
             _mark_live_inference_failure(exc)
             if settings.og_live_strict:
@@ -144,6 +156,7 @@ async def health_check() -> dict:
         "opengradient_live_ready": _live_inference_available(),
         "opengradient_llm_ready": supports_live_llm(),
         "opengradient_last_error": _last_live_inference_error or None,
+        "opengradient_llm_last_error": get_last_llm_error(),
     }
 
 

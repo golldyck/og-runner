@@ -90,6 +90,8 @@ type HealthResponse = {
   status: string
   opengradient_live_ready: boolean
   opengradient_llm_ready?: boolean
+  opengradient_last_error?: string | null
+  opengradient_llm_last_error?: string | null
 }
 
 type WalletPreflightResponse = {
@@ -1122,8 +1124,16 @@ function StatusSummary({
     return null
   }
 
-  const liveReady = Boolean(health?.opengradient_live_ready && walletPreflight?.live_inference_ready)
-  const llmReady = Boolean(health?.opengradient_llm_ready && walletPreflight?.llm_ready)
+  const liveReady = Boolean(
+    health?.opengradient_live_ready &&
+      !health?.opengradient_last_error &&
+      walletPreflight?.live_inference_ready,
+  )
+  const llmReady = Boolean(
+    health?.opengradient_llm_ready &&
+      !health?.opengradient_llm_last_error &&
+      walletPreflight?.llm_ready,
+  )
   const issues = walletPreflight?.issues ?? []
 
   return (
@@ -1137,7 +1147,9 @@ function StatusSummary({
           {llmReady ? 'Explanation live' : 'Explanation fallback'}
         </span>
       </div>
-      <span className="status-summary-copy">{getLiveStatusCopy(liveReady, llmReady, issues)}</span>
+      <span className="status-summary-copy">
+        {getLiveStatusCopy(liveReady, llmReady, issues, health?.opengradient_last_error, health?.opengradient_llm_last_error)}
+      </span>
     </div>
   )
 }
@@ -1933,9 +1945,23 @@ function summarizeWarnings(warnings: string[]) {
   return [...new Set(messages)]
 }
 
-function getLiveStatusCopy(liveReady: boolean, llmReady: boolean, issues: string[]) {
+function getLiveStatusCopy(
+  liveReady: boolean,
+  llmReady: boolean,
+  issues: string[],
+  liveError?: string | null,
+  llmError?: string | null,
+) {
   if (liveReady && llmReady) {
     return 'Inference and explanation routes are ready for OpenGradient live execution.'
+  }
+
+  if (!liveReady && liveError) {
+    return `Live inference is currently degraded: ${liveError}`
+  }
+
+  if (!llmReady && llmError) {
+    return `Explanation is currently degraded: ${llmError}`
   }
 
   if (issues.length > 0) {

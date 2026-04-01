@@ -42,6 +42,7 @@ class ExecutionResult:
 
 _LLM_COOLDOWN_SECONDS = 300
 _llm_cooldown_until = 0.0
+_last_llm_error = ""
 _MARKET_CACHE_TTL_SECONDS = 300
 _market_cache: dict[str, tuple[float, Any]] = {}
 _ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
@@ -1013,6 +1014,10 @@ def supports_live_llm() -> bool:
         and hasattr(og, "TEE_LLM")
         and monotonic() >= _llm_cooldown_until
     )
+
+
+def get_last_llm_error() -> str | None:
+    return _last_llm_error or None
 
 
 def list_models() -> list[ModelDefinition]:
@@ -3208,7 +3213,7 @@ def generate_assistant_answer(
     target_url: str | None = None,
     llm_model: str | None = None,
 ) -> tuple[str, Literal["opengradient_llm", "local_fallback"], str]:
-    global _llm_cooldown_until
+    global _llm_cooldown_until, _last_llm_error
     resolved_llm_model = resolve_tee_llm_model_name(llm_model)
 
     fallback = (
@@ -3240,9 +3245,12 @@ def generate_assistant_answer(
             x402_settlement_mode=og.x402SettlementMode.PRIVATE,
         )
         answer = _extract_llm_text(_await_llm_response(response))
+        _llm_cooldown_until = 0.0
+        _last_llm_error = ""
         return (answer or fallback), "opengradient_llm", resolved_llm_model
-    except Exception:
+    except Exception as exc:
         _llm_cooldown_until = monotonic() + _LLM_COOLDOWN_SECONDS
+        _last_llm_error = str(exc)
         return fallback, "local_fallback", resolved_llm_model
 
 
