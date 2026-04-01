@@ -245,7 +245,7 @@ Recommended environment variables:
 - `OG_RPC_URL=https://ogevmdevnet.opengradient.ai`
 - `OG_API_URL=https://sdk-devnet.opengradient.ai`
 - `OG_INFERENCE_CONTRACT_ADDRESS=0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE`
-- `OG_TEE_LLM_MODEL=GPT_5_MINI`
+- `OG_TEE_LLM_MODEL=CLAUDE_HAIKU_4_5`
 
 ## Environment Notes
 
@@ -256,6 +256,7 @@ See `backend/.env.example`.
 - `OG_PRIVATE_KEY` enables the Base wallet used for OpenGradient-backed LLM calls
 - `OG_ENABLE_LIVE_INFERENCE` controls optional on-chain model inference and is disabled by default in this stack
 - `OG_ENABLE_LIVE_LLM` controls TEE LLM explanations
+- `OG_TEE_LLM_MODEL` selects the live explanation model; `CLAUDE_HAIKU_4_5` is the current production-safe default through the SDK chat path
 - `OG_LIVE_STRICT` disables silent fallback when live routes fail
 
 ### Frontend
