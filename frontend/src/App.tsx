@@ -1656,11 +1656,13 @@ function parseExplanationBlocks(text: string): ExplanationBlock[] {
 
     while (cursor < lines.length) {
       const line = lines[cursor].trim()
-      if (!/^\|.*\|$/.test(line)) {
+      if (!isPipeTableRow(line)) {
         break
       }
 
       const cells = line
+        .replace(/^\|/, '')
+        .replace(/\|$/, '')
         .split('|')
         .map((cell) => cell.trim())
         .filter(Boolean)
@@ -1713,7 +1715,7 @@ function parseExplanationBlocks(text: string): ExplanationBlock[] {
       continue
     }
 
-    if (/^\|.*\|$/.test(line)) {
+    if (isPipeTableRow(line)) {
       flushParagraph()
       index = consumeTable(index)
       continue
@@ -1724,6 +1726,10 @@ function parseExplanationBlocks(text: string): ExplanationBlock[] {
 
   flushParagraph()
   return blocks
+}
+
+function isPipeTableRow(line: string) {
+  return line.split('|').length >= 3
 }
 
 function normalizeExplanationText(text: string) {
