@@ -48,6 +48,26 @@ _market_cache: dict[str, tuple[float, Any]] = {}
 _ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
 
 
+def _resolve_alpha_private_key() -> str | None:
+    return settings.og_alpha_private_key or settings.og_private_key
+
+
+def _resolve_llm_private_key() -> str | None:
+    return settings.og_llm_private_key or settings.og_private_key
+
+
+def _resolve_alpha_rpc_url() -> str:
+    return settings.og_alpha_rpc_url or _ALPHA_RPC_FALLBACK_URL
+
+
+def _resolve_alpha_api_url() -> str:
+    return settings.og_alpha_api_url or settings.og_api_url
+
+
+def _resolve_llm_rpc_url() -> str:
+    return settings.og_llm_rpc_url or settings.og_rpc_url
+
+
 def _number_field(key: str, label: str, description: str, placeholder: str) -> InputField:
     return InputField(
         key=key,
@@ -1002,13 +1022,13 @@ def resolve_model(model_ref: str) -> ModelDefinition:
 
 
 def supports_live_inference() -> bool:
-    return bool(settings.og_enable_live_inference and settings.og_private_key and og is not None)
+    return bool(settings.og_enable_live_inference and _resolve_alpha_private_key() and og is not None)
 
 
 def supports_live_llm() -> bool:
     return bool(
         settings.og_enable_live_llm
-        and settings.og_private_key
+        and _resolve_llm_private_key()
         and og is not None
         and hasattr(og, "LLM")
         and hasattr(og, "TEE_LLM")
@@ -1779,17 +1799,17 @@ def _build_nft_market_context(target_url: str | None, result: dict[str, Any]) ->
 
 def _get_alpha_client(*, rpc_url: str | None = None):
     return og.Alpha(
-        private_key=settings.og_private_key,
-        rpc_url=rpc_url or settings.og_rpc_url,
-        api_url=settings.og_api_url,
+        private_key=_resolve_alpha_private_key(),
+        rpc_url=rpc_url or _resolve_alpha_rpc_url(),
+        api_url=_resolve_alpha_api_url(),
         inference_contract_address=settings.og_inference_contract_address,
     )
 
 
 def _get_llm_client():
     return og.LLM(
-        private_key=settings.og_private_key,
-        rpc_url=settings.og_rpc_url,
+        private_key=_resolve_llm_private_key(),
+        rpc_url=_resolve_llm_rpc_url(),
     )
 
 
@@ -3256,7 +3276,9 @@ def generate_assistant_answer(
 
 def get_wallet_preflight() -> dict[str, Any]:
     issues: list[str] = []
-    if not settings.og_private_key or og is None:
+    alpha_private_key = _resolve_alpha_private_key()
+    llm_private_key = _resolve_llm_private_key()
+    if (not alpha_private_key and not llm_private_key) or og is None:
         return {
             "wallet_address": None,
             "base_sepolia_eth": None,
@@ -3264,33 +3286,54 @@ def get_wallet_preflight() -> dict[str, Any]:
             "permit2_allowance": None,
             "llm_ready": False,
             "live_inference_ready": False,
-            "issues": ["OG_PRIVATE_KEY is not configured."],
+            "issues": ["Set OG_PRIVATE_KEY (or OG_ALPHA_PRIVATE_KEY / OG_LLM_PRIVATE_KEY) to enable OpenGradient live routes."],
         }
 
     try:
         import opengradient.client.opg_token as opg_token
 
-        llm = _get_llm_client()
-        owner = Web3.to_checksum_address(llm._wallet_account.address)
+        llm_owner = None
+        eth_balance = 0.0
+        opg_balance = 0.0
+        allowance = 0.0
+        if llm_private_key:
+            llm = _get_llm_client()
+            llm_owner = Web3.to_checksum_address(llm._wallet_account.address)
         w3, token, spender = opg_token._get_web3_and_contract()
-        eth_balance = float(w3.eth.get_balance(owner)) / 10**18
-        opg_balance = float(token.functions.balanceOf(owner).call()) / 10**18
-        allowance = float(token.functions.allowance(owner, spender).call()) / 10**18
+        if llm_owner:
+            eth_balance = float(w3.eth.get_balance(llm_owner)) / 10**18
+            opg_balance = float(token.functions.balanceOf(llm_owner).call()) / 10**18
+            allowance = float(token.functions.allowance(llm_owner, spender).call()) / 10**18
 
-        if eth_balance <= 0:
-            issues.append("Wallet has no Base Sepolia ETH for gas.")
-        if opg_balance <= 0:
-            issues.append("Wallet has no OPG balance.")
-        if allowance < 0.1:
-            issues.append("Permit2 OPG allowance is below 0.1 OPG for TEE LLM payments.")
+            if eth_balance <= 0:
+                issues.append("LLM wallet has no Base Sepolia ETH for gas.")
+            if opg_balance <= 0:
+                issues.append("LLM wallet has no OPG balance.")
+            if allowance < 0.1:
+                issues.append("Permit2 OPG allowance is below 0.1 OPG for TEE LLM payments.")
+        else:
+            issues.append("LLM wallet is not configured.")
+
+        alpha_owner = None
+        alpha_balance = 0.0
+        if alpha_private_key:
+            alpha_owner = Web3.to_checksum_address(Web3().eth.account.from_key(alpha_private_key).address)
+            alpha_w3 = Web3(Web3.HTTPProvider(_resolve_alpha_rpc_url()))
+            alpha_balance = float(alpha_w3.eth.get_balance(alpha_owner)) / 10**18
+            if alpha_balance <= 0:
+                issues.append(
+                    f"Alpha inference wallet has 0 ETH on chain {alpha_w3.eth.chain_id}. Fund the alpha testnet wallet to enable on-chain ML inference."
+                )
+        else:
+            issues.append("Alpha inference wallet is not configured.")
 
         return {
-            "wallet_address": owner,
+            "wallet_address": llm_owner or alpha_owner,
             "base_sepolia_eth": eth_balance,
             "opg_balance": opg_balance,
             "permit2_allowance": allowance,
-            "llm_ready": eth_balance > 0 and opg_balance > 0 and allowance >= 0.1,
-            "live_inference_ready": eth_balance > 0,
+            "llm_ready": bool(llm_owner and eth_balance > 0 and opg_balance > 0 and allowance >= 0.1),
+            "live_inference_ready": bool(alpha_owner and alpha_balance > 0),
             "issues": issues,
         }
     except Exception as exc:

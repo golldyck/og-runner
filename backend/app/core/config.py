@@ -29,11 +29,16 @@ class Settings(BaseSettings):
 
     # OpenGradient live inference
     og_private_key: str | None = None
+    og_alpha_private_key: str | None = None
+    og_llm_private_key: str | None = None
     og_enable_live_inference: bool = True
     og_enable_live_llm: bool = True
     og_live_strict: bool = False
     og_rpc_url: str = "https://ogevmdevnet.opengradient.ai"
+    og_alpha_rpc_url: str = "https://eth-devnet.opengradient.ai"
+    og_llm_rpc_url: str | None = None
     og_api_url: str = "https://sdk-devnet.opengradient.ai"
+    og_alpha_api_url: str | None = None
     og_inference_contract_address: str = "0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE"
     og_tee_llm_model: str = "GPT_5_MINI"
 
