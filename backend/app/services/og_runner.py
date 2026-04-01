@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import base64
 import json
 import re
 import threading
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
@@ -43,6 +45,10 @@ class ExecutionResult:
 _LLM_COOLDOWN_SECONDS = 300
 _llm_cooldown_until = 0.0
 _last_llm_error = ""
+_LLM_ROUTE_PROBE_TTL_SECONDS = 300
+_llm_route_probe_ready: bool | None = None
+_llm_route_probe_issue = ""
+_llm_route_probe_checked_at = 0.0
 _MARKET_CACHE_TTL_SECONDS = 300
 _market_cache: dict[str, tuple[float, Any]] = {}
 _ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
@@ -1025,19 +1031,110 @@ def supports_live_inference() -> bool:
     return bool(settings.og_enable_live_inference and _resolve_alpha_private_key() and og is not None)
 
 
-def supports_live_llm() -> bool:
+def _supports_live_llm_configured() -> bool:
     return bool(
         settings.og_enable_live_llm
         and _resolve_llm_private_key()
         and og is not None
         and hasattr(og, "LLM")
         and hasattr(og, "TEE_LLM")
+    )
+
+
+def _format_llm_payment_route(issue_payload: dict[str, Any]) -> str:
+    accepts = issue_payload.get("accepts", [])
+    if not accepts:
+        return "Current TEE route did not advertise a Base Sepolia OPG payment option."
+
+    first = accepts[0]
+    scheme = str(first.get("scheme") or "unknown").upper()
+    network = str(first.get("network") or "unknown")
+    token_name = str(first.get("extra", {}).get("name") or "unknown asset")
+    return (
+        "Current TEE route requires "
+        f"{scheme} payment in {token_name} on {network}, not Base Sepolia OPG."
+    )
+
+
+def _probe_live_llm_route() -> tuple[bool, str]:
+    global _llm_route_probe_ready, _llm_route_probe_issue, _llm_route_probe_checked_at
+
+    if not _supports_live_llm_configured():
+        return False, ""
+
+    now = monotonic()
+    if (
+        _llm_route_probe_ready is not None
+        and now - _llm_route_probe_checked_at < _LLM_ROUTE_PROBE_TTL_SECONDS
+    ):
+        return _llm_route_probe_ready, _llm_route_probe_issue
+
+    issue = ""
+    ready = False
+
+    try:
+        import opengradient.client.opg_token as opg_token
+        from opengradient.client.llm import X402_PLACEHOLDER_API_KEY
+        from urllib3.exceptions import InsecureRequestWarning
+
+        llm = _get_llm_client()
+        tee = llm._tee.get()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            response = requests.post(
+                f"{tee.endpoint.rstrip('/')}/v1/completions",
+                json={
+                    "model": "gpt-5-mini",
+                    "prompt": "Reply with OK only.",
+                    "max_tokens": 8,
+                    "temperature": 0,
+                },
+                headers={
+                    "Authorization": f"Bearer {X402_PLACEHOLDER_API_KEY}",
+                    "X-SETTLEMENT-TYPE": "batch",
+                },
+                timeout=15,
+                verify=False,
+            )
+
+        if response.ok:
+            ready = True
+        elif response.status_code == 402:
+            encoded_requirements = response.headers.get("payment-required", "")
+            decoded = json.loads(base64.b64decode(encoded_requirements))
+            accepts = decoded.get("accepts", [])
+            expected_asset = opg_token.BASE_OPG_ADDRESS.lower()
+
+            ready = any(
+                str(option.get("network") or "") == "eip155:84532"
+                and str(option.get("asset") or "").lower() == expected_asset
+                for option in accepts
+            )
+            if not ready:
+                issue = _format_llm_payment_route(decoded)
+        else:
+            issue = f"TEE LLM route probe returned HTTP {response.status_code}."
+    except Exception as exc:
+        issue = f"TEE LLM route probe failed: {exc}"
+
+    _llm_route_probe_ready = ready
+    _llm_route_probe_issue = issue
+    _llm_route_probe_checked_at = now
+    return ready, issue
+
+
+def supports_live_llm() -> bool:
+    route_ready, _ = _probe_live_llm_route()
+    return bool(
+        _supports_live_llm_configured()
         and monotonic() >= _llm_cooldown_until
+        and route_ready
     )
 
 
 def get_last_llm_error() -> str | None:
-    return _last_llm_error or None
+    _, route_issue = _probe_live_llm_route()
+    return _last_llm_error or route_issue or None
 
 
 def list_models() -> list[ModelDefinition]:
@@ -3296,6 +3393,8 @@ def get_wallet_preflight() -> dict[str, Any]:
         eth_balance = 0.0
         opg_balance = 0.0
         allowance = 0.0
+        llm_route_ready = False
+        llm_route_issue = ""
         if llm_private_key:
             llm = _get_llm_client()
             llm_owner = Web3.to_checksum_address(llm._wallet_account.address)
@@ -3311,6 +3410,10 @@ def get_wallet_preflight() -> dict[str, Any]:
                 issues.append("LLM wallet has no OPG balance.")
             if allowance < 0.1:
                 issues.append("Permit2 OPG allowance is below 0.1 OPG for TEE LLM payments.")
+            if eth_balance > 0 and opg_balance > 0 and allowance >= 0.1:
+                llm_route_ready, llm_route_issue = _probe_live_llm_route()
+                if llm_route_issue:
+                    issues.append(llm_route_issue)
         else:
             issues.append("LLM wallet is not configured.")
 
@@ -3332,7 +3435,7 @@ def get_wallet_preflight() -> dict[str, Any]:
             "base_sepolia_eth": eth_balance,
             "opg_balance": opg_balance,
             "permit2_allowance": allowance,
-            "llm_ready": bool(llm_owner and eth_balance > 0 and opg_balance > 0 and allowance >= 0.1),
+            "llm_ready": bool(llm_owner and eth_balance > 0 and opg_balance > 0 and allowance >= 0.1 and llm_route_ready),
             "live_inference_ready": bool(settings.og_enable_live_inference and alpha_owner and alpha_balance > 0),
             "issues": issues,
         }
