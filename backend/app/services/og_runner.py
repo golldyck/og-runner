@@ -49,6 +49,11 @@ _LLM_ROUTE_PROBE_TTL_SECONDS = 300
 _llm_route_probe_ready: bool | None = None
 _llm_route_probe_issue = ""
 _llm_route_probe_checked_at = 0.0
+_LLM_MODEL_FALLBACKS = (
+    "CLAUDE_HAIKU_4_5",
+    "GEMINI_2_5_FLASH",
+    "CLAUDE_SONNET_4_5",
+)
 _MARKET_CACHE_TTL_SECONDS = 300
 _market_cache: dict[str, tuple[float, Any]] = {}
 _ALPHA_RPC_FALLBACK_URL = "https://eth-devnet.opengradient.ai"
@@ -1079,13 +1084,15 @@ def _probe_live_llm_route() -> tuple[bool, str]:
 
         llm = _get_llm_client()
         tee = llm._tee.get()
+        model_name = _iter_tee_llm_model_names()[0]
+        model_value = _get_tee_llm_model_by_name(model_name).split("/")[1]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
             response = requests.post(
-                f"{tee.endpoint.rstrip('/')}/v1/completions",
+                f"{tee.endpoint.rstrip('/')}/v1/chat/completions",
                 json={
-                    "model": "gpt-5-mini",
-                    "prompt": "Reply with OK only.",
+                    "model": model_value,
+                    "messages": [{"role": "user", "content": "Say exactly: OK"}],
                     "max_tokens": 8,
                     "temperature": 0,
                 },
@@ -1098,7 +1105,19 @@ def _probe_live_llm_route() -> tuple[bool, str]:
             )
 
         if response.ok:
-            ready = True
+            payload = response.json()
+            choices = payload.get("choices") or []
+            message = choices[0].get("message", {}) if choices else {}
+            content = message.get("content")
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ).strip()
+            ready = isinstance(content, str) and bool(content.strip())
+            if not ready:
+                issue = f"TEE chat route returned an empty response for model {model_name}."
         elif response.status_code == 402:
             encoded_requirements = response.headers.get("payment-required", "")
             decoded = json.loads(base64.b64decode(encoded_requirements))
@@ -1914,7 +1933,9 @@ def _get_tee_llm_model():
     preferred = settings.og_tee_llm_model.strip().upper()
     if hasattr(og.TEE_LLM, preferred):
         return getattr(og.TEE_LLM, preferred)
-    return og.TEE_LLM.GPT_5_MINI
+    if hasattr(og.TEE_LLM, "CLAUDE_HAIKU_4_5"):
+        return getattr(og.TEE_LLM, "CLAUDE_HAIKU_4_5")
+    return getattr(og.TEE_LLM, list_available_llm_models()[0])
 
 
 def list_available_llm_models() -> list[str]:
@@ -1928,7 +1949,10 @@ def resolve_tee_llm_model_name(preferred: str | None = None) -> str:
     candidate = (preferred or settings.og_tee_llm_model).strip().upper()
     if candidate in available:
         return candidate
-    return "GPT_5_MINI" if "GPT_5_MINI" in available else (available[0] if available else candidate)
+    for fallback in _LLM_MODEL_FALLBACKS:
+        if fallback in available:
+            return fallback
+    return available[0] if available else candidate
 
 
 def _get_tee_llm_model_by_name(preferred: str | None = None):
@@ -1938,6 +1962,25 @@ def _get_tee_llm_model_by_name(preferred: str | None = None):
     return _get_tee_llm_model()
 
 
+def _iter_tee_llm_model_names(preferred: str | None = None) -> list[str]:
+    available = list_available_llm_models()
+    ordered: list[str] = []
+
+    primary = resolve_tee_llm_model_name(preferred)
+    if primary in available:
+        ordered.append(primary)
+
+    for fallback in _LLM_MODEL_FALLBACKS:
+        if fallback in available and fallback not in ordered:
+            ordered.append(fallback)
+
+    for item in available:
+        if item not in ordered:
+            ordered.append(item)
+
+    return ordered
+
+
 def _extract_llm_text(response: Any) -> str:
     text = getattr(response, "text", None)
     if isinstance(text, str) and text.strip():
@@ -1945,6 +1988,11 @@ def _extract_llm_text(response: Any) -> str:
     content = getattr(response, "content", None)
     if isinstance(content, str) and content.strip():
         return content.strip()
+    chat_output = getattr(response, "chat_output", None)
+    if isinstance(chat_output, dict):
+        content = chat_output.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
     if isinstance(response, dict):
         for key in ("text", "content", "message"):
             value = response.get(key)
@@ -3348,23 +3396,38 @@ def generate_assistant_answer(
 
     try:
         llm = _get_llm_client()
-        response = llm.completion(
-            model=_get_tee_llm_model_by_name(resolved_llm_model),
-            prompt=_build_llm_prompt(
-                message=message,
-                model=model,
-                result=result,
-                normalized_input=normalized_input,
-                target_url=target_url,
-            ),
-            max_tokens=260,
-            temperature=0.2,
-            x402_settlement_mode=og.x402SettlementMode.PRIVATE,
+        prompt = _build_llm_prompt(
+            message=message,
+            model=model,
+            result=result,
+            normalized_input=normalized_input,
+            target_url=target_url,
         )
-        answer = _extract_llm_text(_await_llm_response(response))
-        _llm_cooldown_until = 0.0
-        _last_llm_error = ""
-        return (answer or fallback), "opengradient_llm", resolved_llm_model
+
+        for candidate in _iter_tee_llm_model_names(resolved_llm_model):
+            response = llm.chat(
+                model=_get_tee_llm_model_by_name(candidate),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a concise product analyst for OpenGradient model outputs.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                max_tokens=260,
+                temperature=0.2,
+                x402_settlement_mode=og.x402SettlementMode.BATCH_HASHED,
+            )
+            answer = _extract_llm_text(_await_llm_response(response))
+            if answer:
+                _llm_cooldown_until = 0.0
+                _last_llm_error = ""
+                return answer, "opengradient_llm", candidate
+
+        raise RuntimeError("TEE LLM chat returned empty responses for all candidate models.")
     except Exception as exc:
         _llm_cooldown_until = monotonic() + _LLM_COOLDOWN_SECONDS
         _last_llm_error = str(exc)

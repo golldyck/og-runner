@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     og_api_url: str = "https://sdk-devnet.opengradient.ai"
     og_alpha_api_url: str | None = None
     og_inference_contract_address: str = "0x8383C9bD7462F12Eb996DD02F78234C0421A6FaE"
-    og_tee_llm_model: str = "GPT_5_MINI"
+    og_tee_llm_model: str = "CLAUDE_HAIKU_4_5"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
