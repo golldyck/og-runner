@@ -745,6 +745,7 @@ function App() {
                             <span className="field-label">Your model ref</span>
                             <input
                               className="screen-input"
+                              name="custom-model-ref"
                               value={modelRef}
                               onChange={(event) => setModelRef(event.target.value)}
                               placeholder="Enter your model"
@@ -933,6 +934,7 @@ function App() {
                                                     <td key={`${field.key}-r-${rowIndex}-c-${colIndex}`}>
                                                       <input
                                                         className="matrix-cell-input"
+                                                        name={`${field.key}-${rowIndex}-${colIndex}`}
                                                         type="number"
                                                         step="any"
                                                         value={String(cell)}
@@ -966,6 +968,7 @@ function App() {
                                     {matrixGridEnabled ? null : (
                                       <textarea
                                         className="screen-input screen-textarea"
+                                        name={field.key}
                                         value={rawMatrixValue}
                                         onChange={(event) =>
                                           setInputValues((current) => ({
@@ -984,6 +987,7 @@ function App() {
                                 ) : (
                                   <input
                                     className="screen-input"
+                                    name={field.key}
                                     value={String(inputValues[field.key] ?? '')}
                                     onChange={(event) =>
                                       setInputValues((current) => ({
@@ -1005,6 +1009,7 @@ function App() {
                         <span className="field-label">{getTargetFieldLabel(model)}</span>
                         <input
                           className="screen-input"
+                          name="target-url"
                           value={targetUrl}
                           onChange={(event) => setTargetUrl(event.target.value)}
                           placeholder={getTargetHint(model)}
