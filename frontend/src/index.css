@@ -861,6 +861,7 @@ input {
 }
 
 .panel-transition {
+  min-height: 0;
   animation: panel-fade-up 260ms ease;
 }
 
@@ -1395,13 +1396,18 @@ input {
 .leaderboard-tab {
   display: grid;
   gap: 0.95rem;
+  height: 100%;
   min-height: 0;
+  align-content: start;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .leaderboard-tab-panel {
   margin: 0 auto;
   width: min(100%, 72rem);
+  min-height: 0;
   border-radius: 1.1rem;
   border: 1px solid var(--og-line);
   background:
