@@ -29,7 +29,7 @@
 
 ## Overview
 
-OG Runner is a full-stack OpenGradient product shell for resolving models, running protocol analysis, inspecting model outputs, and keeping a live record of what was executed. It combines a FastAPI backend with a React + Vite frontend and supports both OpenGradient live inference and reliable local fallback flows when live execution is unavailable.
+OG Runner is a full-stack OpenGradient product shell for resolving models, running protocol analysis, inspecting model outputs, and keeping a live record of what was executed. It combines a FastAPI backend with a React + Vite frontend and is now tuned for a practical `Base Sepolia + OPG` stack: local model execution for the scoring path, plus OpenGradient-backed live LLM explanations.
 
 This repository is built for a practical workflow:
 
@@ -52,8 +52,8 @@ Most AI-model demos stop at a single score. OG Runner is built around the full o
 
 It is designed to be useful in both of these states:
 
-- `live`: OpenGradient wallet, inference route, and TEE LLM are available
-- `fallback`: the runner stays usable with local shaping, local explanation, and protocol heuristics
+- `base + opg`: local scoring stays available while OpenGradient LLM explanations run from the configured Base wallet
+- `extended live`: optional OpenGradient live inference can be enabled separately when that route is available for your deployment
 
 That makes the repo suitable both for real OpenGradient-connected demos and for deterministic local development.
 
@@ -74,10 +74,10 @@ The backend also supports dynamic Hub model metadata fetches when a model exists
 The runner supports three execution paths:
 
 - `demo`: deterministic local output based on sample inputs and protocol heuristics
-- `live`: real OpenGradient inference against the configured model CID
+- `live`: optional OpenGradient inference against the configured model CID
 - `fallback`: local execution when live inference or LLM explanation is temporarily unavailable
 
-This is intentional. The product should never become unusable just because the live route is down or cooling off.
+The default production profile in this repository is `Base Sepolia + OPG`: scoring runs locally, LLM explanations run live through OpenGradient, and on-chain model inference stays optional.
 
 ### 3. Protocol-Aware Analysis
 
@@ -128,7 +128,7 @@ The fastest way to understand the product is:
 1. Open the runner and choose `Governance Capture Risk Scorer`.
 2. Paste a protocol URL such as `https://app.aave.com/governance` or `https://stargate.finance`.
 3. Run in `demo` mode first to verify the output shape and explanation path.
-4. If `OG_PRIVATE_KEY` is configured, switch to live-ready usage and verify wallet preflight.
+4. If `OG_PRIVATE_KEY` is configured, verify wallet preflight and live explanation readiness.
 5. Inspect the protocol tab, then move to leaderboard to see how the run compares with prior entries.
 
 ## Screenshots
@@ -240,7 +240,7 @@ Recommended environment variables:
 
 - `CORS_ORIGINS=["https://${{RAILWAY_PUBLIC_DOMAIN}}"]`
 - `OG_PRIVATE_KEY=...`
-- `OG_ENABLE_LIVE_INFERENCE=true|false`
+- `OG_ENABLE_LIVE_INFERENCE=false`
 - `OG_ENABLE_LIVE_LLM=true|false`
 - `OG_RPC_URL=https://ogevmdevnet.opengradient.ai`
 - `OG_API_URL=https://sdk-devnet.opengradient.ai`
@@ -253,8 +253,8 @@ Recommended environment variables:
 
 See `backend/.env.example`.
 
-- `OG_PRIVATE_KEY` enables live OpenGradient wallet-backed execution
-- `OG_ENABLE_LIVE_INFERENCE` controls live inference routing
+- `OG_PRIVATE_KEY` enables the Base wallet used for OpenGradient-backed LLM calls
+- `OG_ENABLE_LIVE_INFERENCE` controls optional on-chain model inference and is disabled by default in this stack
 - `OG_ENABLE_LIVE_LLM` controls TEE LLM explanations
 - `OG_LIVE_STRICT` disables silent fallback when live routes fail
 
