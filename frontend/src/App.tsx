@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import ogRunnerLogo from './assets/og-runner-logo.svg'
 
 type InputField = {
@@ -1504,7 +1505,7 @@ function RunnerPreviewPanel({
             <div className="result-grid result-grid-stack">
               <div className="result-card">
                 <p className="panel-kicker">Quick read</p>
-                <p className="result-explanation">{runResult.ai_explanation}</p>
+                <FormattedExplanation text={runResult.ai_explanation} />
                 <div className="parameter-scale-list">
                   <p className="panel-kicker">Model parameters</p>
                   <ParameterScaleList model={model} result={runResult.result} />
@@ -1550,6 +1551,212 @@ function RunnerPreviewPanel({
       </div>
     </div>
   )
+}
+
+function FormattedExplanation({ text }: { text: string }) {
+  const blocks = parseExplanationBlocks(text)
+
+  return (
+    <div className="result-explanation">
+      {blocks.map((block, index) => {
+        if (block.type === 'heading') {
+          return (
+            <h4 key={`heading-${index}`} className="result-explanation-heading">
+              {renderInlineMarkdown(block.content)}
+            </h4>
+          )
+        }
+
+        if (block.type === 'list') {
+          const ListTag = block.ordered ? 'ol' : 'ul'
+          return (
+            <ListTag
+              key={`list-${index}`}
+              className={`result-explanation-list ${block.ordered ? 'result-explanation-list-ordered' : ''}`}
+            >
+              {block.items.map((item, itemIndex) => (
+                <li key={`list-item-${index}-${itemIndex}`}>{renderInlineMarkdown(item)}</li>
+              ))}
+            </ListTag>
+          )
+        }
+
+        if (block.type === 'table') {
+          return (
+            <div key={`table-${index}`} className="result-explanation-table">
+              <div className="result-explanation-table-row result-explanation-table-head">
+                {block.headers.map((cell, cellIndex) => (
+                  <span key={`head-${index}-${cellIndex}`}>{renderInlineMarkdown(cell)}</span>
+                ))}
+              </div>
+              {block.rows.map((row, rowIndex) => (
+                <div key={`row-${index}-${rowIndex}`} className="result-explanation-table-row">
+                  {row.map((cell, cellIndex) => (
+                    <span key={`cell-${index}-${rowIndex}-${cellIndex}`}>{renderInlineMarkdown(cell)}</span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )
+        }
+
+        return (
+          <p key={`paragraph-${index}`} className="result-explanation-paragraph">
+            {renderInlineMarkdown(block.content)}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
+type ExplanationBlock =
+  | { type: 'heading'; content: string }
+  | { type: 'paragraph'; content: string }
+  | { type: 'list'; items: string[]; ordered: boolean }
+  | { type: 'table'; headers: string[]; rows: string[][] }
+
+function parseExplanationBlocks(text: string): ExplanationBlock[] {
+  const lines = normalizeExplanationText(text).split('\n')
+  const blocks: ExplanationBlock[] = []
+  let paragraph: string[] = []
+
+  const flushParagraph = () => {
+    const content = paragraph.join(' ').trim()
+    if (content) {
+      blocks.push({ type: 'paragraph', content })
+    }
+    paragraph = []
+  }
+
+  const consumeList = (start: number, ordered: boolean) => {
+    const items: string[] = []
+    let cursor = start
+    const pattern = ordered ? /^\d+\.\s+(.*)$/ : /^[-*]\s+(.*)$/
+
+    while (cursor < lines.length) {
+      const line = lines[cursor].trim()
+      const match = line.match(pattern)
+      if (!match) {
+        break
+      }
+      items.push(match[1].trim())
+      cursor += 1
+    }
+
+    if (items.length > 0) {
+      blocks.push({ type: 'list', items, ordered })
+    }
+    return cursor - 1
+  }
+
+  const consumeTable = (start: number) => {
+    const rows: string[][] = []
+    let cursor = start
+
+    while (cursor < lines.length) {
+      const line = lines[cursor].trim()
+      if (!/^\|.*\|$/.test(line)) {
+        break
+      }
+
+      const cells = line
+        .split('|')
+        .map((cell) => cell.trim())
+        .filter(Boolean)
+
+      if (cells.length > 0) {
+        rows.push(cells)
+      }
+      cursor += 1
+    }
+
+    if (rows.length > 0) {
+      const separatorIndex = rows.findIndex((row) => row.every((cell) => /^:?-{3,}:?$/.test(cell)))
+      const headers = rows[0] ?? []
+      const dataRows = separatorIndex >= 0 ? rows.slice(separatorIndex + 1) : rows.slice(1)
+      if (headers.length > 0 && dataRows.length > 0) {
+        blocks.push({ type: 'table', headers, rows: dataRows })
+      } else if (headers.length > 0) {
+        blocks.push({ type: 'paragraph', content: headers.join(' | ') })
+      }
+    }
+
+    return cursor - 1
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index]
+    const line = rawLine.trim()
+
+    if (!line || /^---+$/.test(line)) {
+      flushParagraph()
+      continue
+    }
+
+    const headingMatch = line.match(/^#{1,6}\s+(.*)$/)
+    if (headingMatch) {
+      flushParagraph()
+      blocks.push({ type: 'heading', content: headingMatch[1].trim() })
+      continue
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      flushParagraph()
+      index = consumeList(index, false)
+      continue
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      flushParagraph()
+      index = consumeList(index, true)
+      continue
+    }
+
+    if (/^\|.*\|$/.test(line)) {
+      flushParagraph()
+      index = consumeTable(index)
+      continue
+    }
+
+    paragraph.push(line)
+  }
+
+  flushParagraph()
+  return blocks
+}
+
+function normalizeExplanationText(text: string) {
+  return text
+    .replace(/\r/g, '')
+    .replace(/\s+---\s+/g, '\n\n')
+    .replace(/\s+(#{1,6}\s+)/g, '\n$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function renderInlineMarkdown(content: string): ReactNode {
+  const normalized = content.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+
+  const segments = normalized.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean)
+  return segments.map((segment, index) => {
+    if (segment.startsWith('**') && segment.endsWith('**')) {
+      return <strong key={`strong-${index}`}>{segment.slice(2, -2)}</strong>
+    }
+
+    if (segment.startsWith('`') && segment.endsWith('`')) {
+      return (
+        <code key={`code-${index}`} className="result-explanation-code">
+          {segment.slice(1, -1)}
+        </code>
+      )
+    }
+
+    return <Fragment key={`text-${index}`}>{segment}</Fragment>
+  })
 }
 
 function ProtocolViewport({
