@@ -1,4 +1,4 @@
 fastapi[standard]==0.115.0
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-opengradient==0.9.4
+opengradient==0.9.9
